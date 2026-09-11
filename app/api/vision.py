@@ -3,7 +3,7 @@ import shutil
 
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import Any
+# from typing import Any
 
 from fastapi import (
     APIRouter,
@@ -23,6 +23,10 @@ from app.schemas.vision import (
     MultiFrameComparisonResponse,
     MovementResult,
     PersonDetection,
+    TrackingResponse,
+    TrackedFrameResponse,
+    TrackedDetectionResponse,
+    TrackedPersonResponse,
 )
 
 from app.services.vision import (
@@ -51,8 +55,22 @@ from app.services.frame_quality import (
 )
 
 from app.services.frame_comparison import (
+    Movement,
     compare_people,
     compare_objects,
+    estimate_camera_motion,
+)
+
+from app.services.frame_similarity import (
+    are_frames_duplicates,
+)
+
+from app.services.tracking import (
+    track_frames,
+)
+
+from app.services.track_identity import (
+    associate_faces_with_tracks,
 )
 
 router = APIRouter(
@@ -814,8 +832,8 @@ async def compare_frames_endpoint(
             ),
         )
 
-    person_movements: list[Any] = []
-    object_movements: list[Any] = []
+    person_movements: list[MovementResult] = []
+    object_movements: list[MovementResult] = []
 
     for index in range(
         len(analyses) - 1
@@ -824,53 +842,571 @@ async def compare_frames_endpoint(
         first = analyses[index]
         second = analyses[index + 1]
 
-        person_movements.extend(
-            compare_people(
-                first=first,
-                second=second,
+        for movement in compare_people(
+            first=first,
+            second=second,
+        ):
+            person_movements.append(
+                MovementResult(
+                    label=movement.label,
+                    from_position=(
+                        movement.from_position
+                    ),
+                    to_position=(
+                        movement.to_position
+                    ),
+                    movement_distance=(
+                        movement.distance
+                    ),
+                    direction=movement.direction,
+                )
             )
-        )
 
-        object_movements.extend(
-            compare_objects(
-                first=first,
-                second=second,
+        for movement in compare_objects(
+            first=first,
+            second=second,
+        ):
+            object_movements.append(
+                MovementResult(
+                    label=movement.label,
+                    from_position=(
+                        movement.from_position
+                    ),
+                    to_position=(
+                        movement.to_position
+                    ),
+                    movement_distance=(
+                        movement.distance
+                    ),
+                    direction=movement.direction,
+                )
             )
-        )
 
     return MultiFrameComparisonResponse(
         success=True,
         frames_compared=len(
             analyses
         ),
-        person_movements=[
-            MovementResult(
-                label=movement.label,
-                from_position=(
-                    movement.from_position
-                ),
-                to_position=(
-                    movement.to_position
-                ),
-                movement_distance=(
-                    movement.distance
-                ),
-            )
-            for movement in person_movements
-        ],
-        object_movements=[
-            MovementResult(
-                label=movement.label,
-                from_position=(
-                    movement.from_position
-                ),
-                to_position=(
-                    movement.to_position
-                ),
-                movement_distance=(
-                    movement.distance
-                ),
-            )
-            for movement in object_movements
-        ],
+        person_movements=person_movements,
+        object_movements=object_movements,
     )
+
+@router.post(
+    "/analyze-and-compare",
+    response_model=MultiFrameComparisonResponse,
+)
+async def analyze_and_compare(
+    image1: UploadFile = File(...),
+    image2: UploadFile | None = File(None),
+    image3: UploadFile | None = File(None),
+    image4: UploadFile | None = File(None),
+    image5: UploadFile | None = File(None),
+) -> MultiFrameComparisonResponse:
+
+    images: list[UploadFile] = [
+        image1,
+    ]
+
+    if image2 is not None:
+        images.append(image2)
+
+    if image3 is not None:
+        images.append(image3)
+
+    if image4 is not None:
+        images.append(image4)
+
+    if image5 is not None:
+        images.append(image5)
+
+    analyses: list[FrameAnalysis] = []
+
+    frame_paths: list[str] = []
+
+    # =====================================================
+    # SAVE UPLOADED FRAMES
+    # =====================================================
+
+    for image in images:
+
+        suffix = Path(
+            image.filename or "frame.jpg"
+        ).suffix
+
+        with NamedTemporaryFile(
+            suffix=suffix,
+            delete=False,
+        ) as temp_file:
+
+            image_bytes = await image.read()
+
+            temp_file.write(
+                image_bytes
+            )
+
+            temp_path = temp_file.name
+
+        frame_paths.append(
+            temp_path
+        )
+
+        await image.close()
+
+    # =====================================================
+    # REMOVE CONSECUTIVE DUPLICATE FRAMES
+    # =====================================================
+
+    unique_frame_paths: list[str] = []
+
+    for frame_path in frame_paths:
+
+        if not unique_frame_paths:
+            unique_frame_paths.append(
+                frame_path
+            )
+            continue
+
+        previous_path = (
+            unique_frame_paths[-1]
+        )
+
+        if are_frames_duplicates(
+            first_path=previous_path,
+            second_path=frame_path,
+        ):
+            Path(frame_path).unlink(
+                missing_ok=True
+            )
+            continue
+
+        unique_frame_paths.append(
+            frame_path
+        )
+
+    # =====================================================
+    # ANALYZE UNIQUE FRAMES
+    # =====================================================
+
+    for index, temp_path in enumerate(
+        unique_frame_paths
+    ):
+
+        try:
+
+            # ---------------------------------------------
+            # FRAME QUALITY
+            # ---------------------------------------------
+
+            blur_score = calculate_blur_score(
+                temp_path
+            )
+
+            brightness = calculate_brightness(
+                temp_path
+            )
+
+            good = is_frame_good(
+                temp_path,
+                blur_threshold=100.0,
+                min_brightness=35.0,
+                max_brightness=220.0,
+            )
+
+            if not good:
+                continue
+
+            # ---------------------------------------------
+            # YOLO26
+            # ---------------------------------------------
+
+            objects: list[Detection] = (
+                detect_objects(
+                    image_path=temp_path,
+                    confidence_threshold=0.40,
+                )
+            )
+
+            # ---------------------------------------------
+            # INSIGHTFACE
+            # ---------------------------------------------
+
+            face_results = recognize_faces(
+                temp_path
+            )
+
+            # ---------------------------------------------
+            # IMAGE SIZE
+            # ---------------------------------------------
+
+            frame = cv2.imread(
+                temp_path
+            )
+
+            if frame is None:
+                continue
+
+            image_height, image_width = (
+                frame.shape[:2]
+            )
+
+            # ---------------------------------------------
+            # PERSON OBJECTS
+            # ---------------------------------------------
+
+            person_objects = [
+                detection
+                for detection in objects
+                if detection.class_name == "person"
+            ]
+
+            # ---------------------------------------------
+            # PEOPLE
+            # ---------------------------------------------
+
+            people: list[
+                PersonDetection
+            ] = []
+
+            for face_index, face in enumerate(
+                face_results
+            ):
+
+                face_box = (
+                    face.x1,
+                    face.y1,
+                    face.x2,
+                    face.y2,
+                )
+
+                matched_person_index: int | None = None
+
+                for person_index, person in enumerate(
+                    person_objects
+                ):
+
+                    person_box = (
+                        person.x1,
+                        person.y1,
+                        person.x2,
+                        person.y2,
+                    )
+
+                    if is_face_inside_person(
+                        face_box,
+                        person_box,
+                    ):
+                        matched_person_index = (
+                            person_index
+                        )
+                        break
+
+                horizontal_position = (
+                    get_relative_position(
+                        face_box=face_box,
+                        image_width=float(
+                            image_width
+                        ),
+                    )
+                )
+
+                vertical_position = (
+                    get_relative_vertical_position(
+                        face_box=face_box,
+                        image_height=float(
+                            image_height
+                        ),
+                    )
+                )
+
+                people.append(
+                    PersonDetection(
+                        face_id=(
+                            f"face-{face_index + 1}"
+                        ),
+                        person_index=(
+                            matched_person_index
+                        ),
+                        name=face.name,
+                        similarity=(
+                            face.similarity
+                        ),
+                        recognized=(
+                            face.name is not None
+                        ),
+                        confidence=face.confidence,
+                        x1=face.x1,
+                        y1=face.y1,
+                        x2=face.x2,
+                        y2=face.y2,
+                        relative_position=(
+                            horizontal_position
+                        ),
+                        vertical_position=(
+                            vertical_position
+                        ),
+                    )
+                )
+
+            # ---------------------------------------------
+            # SAVE ANALYSIS
+            # ---------------------------------------------
+
+            analyses.append(
+                FrameAnalysis(
+                    index=index,
+                    blur_score=blur_score,
+                    brightness=brightness,
+                    objects=objects,
+                    people=people,
+                )
+            )
+
+        except Exception:
+            # Bad frame should not break
+            # the complete batch.
+            continue
+
+    # =====================================================
+    # NEED AT LEAST TWO GOOD FRAMES
+    # =====================================================
+
+    if len(analyses) < 2:
+
+        for path in frame_paths:
+            Path(path).unlink(
+                missing_ok=True
+            )
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "At least 2 good frames "
+                "are required for comparison."
+            ),
+        )
+
+    # =====================================================
+    # COMPARE FRAMES
+    # =====================================================
+
+    person_movements: list[Movement] = []
+    object_movements: list[Movement] = []
+
+    analysis_paths: list[tuple[FrameAnalysis, str]] = []
+
+    for analysis in analyses:
+        if 0 <= analysis.index < len(unique_frame_paths):
+            analysis_paths.append(
+                (
+                    analysis,
+                    unique_frame_paths[analysis.index],
+                )
+            )
+
+    try:
+        for index in range(len(analysis_paths) - 1):
+            first_analysis, first_path = analysis_paths[index]
+            second_analysis, second_path = analysis_paths[index + 1]
+
+            camera_dx, camera_dy = estimate_camera_motion(
+                previous_path=first_path,
+                current_path=second_path,
+            )
+
+            person_movements.extend(
+                compare_people(
+                    first=first_analysis,
+                    second=second_analysis,
+                    camera_dx=camera_dx,
+                    camera_dy=camera_dy,
+                )
+            )
+
+            object_movements.extend(
+                compare_objects(
+                    first=first_analysis,
+                    second=second_analysis,
+                    camera_dx=camera_dx,
+                    camera_dy=camera_dy,
+                )
+            )
+
+        return MultiFrameComparisonResponse(
+            success=True,
+            frames_compared=len(analysis_paths),
+            person_movements=[
+                MovementResult(
+                    label=movement.label,
+                    from_position=movement.from_position,
+                    to_position=movement.to_position,
+                    movement_distance=movement.distance,
+                    direction=movement.direction,
+                )
+                for movement in person_movements
+            ],
+            object_movements=[
+                MovementResult(
+                    label=movement.label,
+                    from_position=movement.from_position,
+                    to_position=movement.to_position,
+                    movement_distance=movement.distance,
+                    direction=movement.direction,
+                )
+                for movement in object_movements
+            ],
+        )
+
+    finally:
+        for path in frame_paths:
+            Path(path).unlink(missing_ok=True)
+            
+@router.post(
+    "/track-frames",
+    response_model=TrackingResponse,
+)
+async def track_uploaded_frames(
+    image1: UploadFile = File(...),
+    image2: UploadFile | None = File(None),
+    image3: UploadFile | None = File(None),
+    image4: UploadFile | None = File(None),
+    image5: UploadFile | None = File(None),
+) -> TrackingResponse:
+
+    images: list[UploadFile] = [
+        image1,
+    ]
+
+    if image2 is not None:
+        images.append(image2)
+
+    if image3 is not None:
+        images.append(image3)
+
+    if image4 is not None:
+        images.append(image4)
+
+    if image5 is not None:
+        images.append(image5)
+
+    temp_paths: list[str] = []
+
+    try:
+
+        for image in images:
+
+            suffix = Path(
+                image.filename or "frame.jpg"
+            ).suffix
+
+            with NamedTemporaryFile(
+                suffix=suffix,
+                delete=False,
+            ) as temp_file:
+
+                image_bytes = (
+                    await image.read()
+                )
+
+                temp_file.write(
+                    image_bytes
+                )
+
+                temp_paths.append(
+                    temp_file.name
+                )
+
+            await image.close()
+
+        # ---------------------------------------------
+        # RUN YOLO26 + BYTE TRACK
+        # ---------------------------------------------
+
+        tracked_frames = track_frames(
+            image_paths=temp_paths,
+            confidence_threshold=0.40,
+        )
+
+        frames: list[
+            TrackedFrameResponse
+        ] = []
+
+        for index, detections in enumerate(
+            tracked_frames
+        ):
+
+            associations = (
+                associate_faces_with_tracks(
+                    image_path=temp_paths[index],
+                    tracked_detections=detections,
+                )
+            )
+
+            people: list[
+                TrackedPersonResponse
+            ] = []
+
+            for detection in detections:
+
+                if detection.class_name != "person":
+                    continue
+
+                name, similarity = (
+                    associations.get(
+                        detection.track_id,
+                        (None, None),
+                    )
+                )
+
+                people.append(
+                    TrackedPersonResponse(
+                        track_id=detection.track_id,
+                        name=name,
+                        recognized=(
+                            name is not None
+                        ),
+                        recognition_similarity=similarity,
+                        confidence=detection.confidence,
+                        x1=detection.x1,
+                        y1=detection.y1,
+                        x2=detection.x2,
+                        y2=detection.y2,
+                    )
+                )
+
+            frames.append(
+                TrackedFrameResponse(
+                    index=index,
+                    detections=[
+                        TrackedDetectionResponse(
+                            track_id=(
+                                detection.track_id
+                            ),
+                            class_name=(
+                                detection.class_name
+                            ),
+                            confidence=(
+                                detection.confidence
+                            ),
+                            x1=detection.x1,
+                            y1=detection.y1,
+                            x2=detection.x2,
+                            y2=detection.y2,
+                        )
+                        for detection in detections
+                    ],
+                    people=people,
+                )
+            )
+
+        return TrackingResponse(
+            success=True,
+            frames=frames,
+        )
+
+    finally:
+
+        for path in temp_paths:
+
+            Path(path).unlink(
+                missing_ok=True
+            )

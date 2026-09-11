@@ -126,6 +126,7 @@ class MovementResult(BaseModel):
     from_position: str
     to_position: str
     movement_distance: float
+    direction: str
 
 
 class MultiFrameComparisonResponse(BaseModel):
@@ -133,3 +134,51 @@ class MultiFrameComparisonResponse(BaseModel):
     frames_compared: int
     person_movements: list[MovementResult]
     object_movements: list[MovementResult]
+
+class TrackedDetectionResponse(BaseModel):
+    track_id: int
+    class_name: str
+    confidence: float
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+
+
+
+    
+class TrackedPersonResponse(BaseModel):
+    track_id: int
+
+    name: str | None
+
+    recognized: bool
+
+    recognition_similarity: float | None
+
+    confidence: float
+
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+
+
+class TrackedFrameResponse(BaseModel):
+    index: int
+
+    detections: list[
+        TrackedDetectionResponse
+    ]
+
+    people: list[
+        TrackedPersonResponse
+    ]
+
+
+class TrackingResponse(BaseModel):
+    success: bool
+
+    frames: list[
+        TrackedFrameResponse
+    ]
