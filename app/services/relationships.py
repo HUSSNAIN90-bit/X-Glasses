@@ -280,12 +280,11 @@ def detect_holding_relationships(
         near_hand = adaptive_hand_near_object(
             keypoints=keypoints,
             object_bbox=obj.bbox,
-            person_bbox=[
-                person.x1,
-                person.y1,
-                person.x2,
-                person.y2,
-            ],
+            person_bbox=(
+            person.person_bbox
+            if person.person_bbox is not None
+            else person.bbox    
+        ),
         )
         print(
     f"[HOLDING DEBUG] "
