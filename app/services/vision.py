@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 from ultralytics import YOLO
 
@@ -15,7 +16,8 @@ def detect_objects(
     confidence_threshold: float = 0.25,
 ) -> list[Detection]:
 
-    results = model.predict(
+
+    results: list[Any] = model.predict(
         source=image_path,
         conf=confidence_threshold,
         verbose=False,
@@ -28,19 +30,77 @@ def detect_objects(
         if result.boxes is None:
             continue
 
+        # ---------------------------------------------
+        # IMAGE SIZE
+        # ---------------------------------------------
+
+        image_height: float = float(result.orig_shape[0])
+        image_width: float = float(result.orig_shape[1])
+
         for box in result.boxes:
 
-            class_id: int = int(box.cls.item())
-            confidence: float = float(box.conf.item())
+            class_id: int = int(
+                box.cls.item()
+            )
 
-            coordinates = box.xyxy[0].tolist()
+            confidence: float = float(
+                box.conf.item()
+            )
 
-            x1: float = float(coordinates[0])
-            y1: float = float(coordinates[1])
-            x2: float = float(coordinates[2])
-            y2: float = float(coordinates[3])
+            coordinates: list[float] = [
+                float(value)
+                for value in box.xyxy[0].tolist()
+            ]
 
-            class_name: str = result.names[class_id]
+            x1: float = float(
+                coordinates[0]
+            )
+
+            y1: float = float(
+                coordinates[1]
+            )
+
+            x2: float = float(
+                coordinates[2]
+            )
+
+            y2: float = float(
+                coordinates[3]
+            )
+
+            class_name: str = str(
+                result.names[class_id]
+            )
+
+            # -----------------------------------------
+            # OBJECT POSITION
+            # -----------------------------------------
+
+            relative_position = (
+                get_relative_position(
+                    box=(
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                    ),
+                    image_width=image_width,
+                )
+            )
+
+            vertical_position = (
+                get_relative_vertical_position(
+                    face_box=(
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                    ),
+                    image_height=float(
+                        image_height
+                    ),
+                )
+            )
 
             detections.append(
                 Detection(
@@ -50,6 +110,12 @@ def detect_objects(
                     y1=y1,
                     x2=x2,
                     y2=y2,
+                    relative_position=(
+                        relative_position
+                    ),
+                    vertical_position=(
+                        vertical_position
+                    ),
                 )
             )
 
@@ -133,7 +199,7 @@ def is_face_inside_person(
     )
 
 def get_relative_position(
-    face_box: tuple[
+    box: tuple[
         float,
         float,
         float,
@@ -142,7 +208,7 @@ def get_relative_position(
     image_width: float,
 ) -> str:
 
-    x1, _, x2, _ = face_box
+    x1, _, x2, _ = box
 
     center_x = (
         x1 + x2

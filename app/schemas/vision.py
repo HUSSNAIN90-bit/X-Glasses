@@ -6,9 +6,7 @@ from pydantic import BaseModel, Field
 # =========================================================
 
 class Detection(BaseModel):
-    class_name: str = Field(
-        min_length=1,
-    )
+    class_name: str = Field(min_length=1)
 
     confidence: float = Field(
         ge=0.0,
@@ -19,6 +17,9 @@ class Detection(BaseModel):
     y1: float
     x2: float
     y2: float
+
+    relative_position: str | None = None
+    vertical_position: str | None = None
 
 
 class VisionResponse(BaseModel):

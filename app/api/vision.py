@@ -251,7 +251,7 @@ async def analyze_frame(
 
             horizontal_position = (
                 get_relative_position(
-                    face_box=face_box,
+                    box=face_box,
                     image_width=float(
                         image_width
                     ),
@@ -735,7 +735,7 @@ async def analyze_frames(
 
                 horizontal_position = (
                     get_relative_position(
-                        face_box=face_box,
+                        box=face_box,
                         image_width=float(
                             image_width
                         ),
@@ -1102,7 +1102,7 @@ async def analyze_and_compare(
 
                 horizontal_position = (
                     get_relative_position(
-                        face_box=face_box,
+                        box=face_box,
                         image_width=float(
                             image_width
                         ),
