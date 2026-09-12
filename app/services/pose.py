@@ -64,24 +64,30 @@ def detect_pose(
         boxes = result.boxes
         keypoints = result.keypoints
 
-        for index in range(len(boxes)):
+        for person_index in range(len(boxes)):
 
             confidence = float(
-                boxes.conf[index].item()
+                boxes.conf[person_index].item()
             )
 
             x1, y1, x2, y2 = (
-                boxes.xyxy[index]
+                boxes.xyxy[person_index]
                 .tolist()
             )
 
             posture = classify_posture(
-                keypoints.xy[index]
+                result.keypoints.xy[person_index]
+            )
+
+            keypoints = (
+                result.keypoints.xy[person_index]
+                .cpu()
+                .tolist()
             )
 
             poses.append(
                 PoseDetection(
-                    person_index=index,
+                    person_index=person_index,
                     posture=posture,
                     confidence=confidence,
                     bbox=[
@@ -90,6 +96,7 @@ def detect_pose(
                         float(x2),
                         float(y2),
                     ],
+                    keypoints=keypoints,
                 )
             )
 

@@ -21,6 +21,15 @@ class Detection(BaseModel):
     relative_position: str | None = None
     vertical_position: str | None = None
 
+    @property
+    def bbox(self) -> list[float]:
+        return [
+            self.x1,
+            self.y1,
+            self.x2,
+            self.y2,
+        ]
+
 
 class VisionResponse(BaseModel):
     success: bool
@@ -32,6 +41,7 @@ class PoseDetection(BaseModel):
     posture: str
     confidence: float
     bbox: list[float]
+    keypoints: list[list[float]]
 
 # =========================================================
 # PERSON / FACE DETECTION
@@ -65,6 +75,15 @@ class PersonDetection(BaseModel):
     posture: str | None = None
 
     posture_confidence: float | None = None
+
+    @property
+    def bbox(self) -> list[float]:
+        return [
+            self.x1,
+            self.y1,
+            self.x2,
+            self.y2,
+        ]
 
 
 # =========================================================
