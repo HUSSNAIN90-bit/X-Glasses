@@ -43,6 +43,7 @@ class PoseDetection(BaseModel):
     bbox: list[float]
     keypoints: list[list[float]]
 
+
 class Relationship(BaseModel):
     subject: str
     relation: str
@@ -51,6 +52,7 @@ class Relationship(BaseModel):
         ge=0.0,
         le=1.0,
     )
+
 
 # =========================================================
 # PERSON / FACE DETECTION
@@ -114,6 +116,7 @@ class CombinedVisionResponse(BaseModel):
         default_factory=lambda: list[Relationship](),
     )
 
+
 # =========================================================
 # FRAME QUALITY
 # =========================================================
@@ -164,7 +167,8 @@ class MultiFrameAnalysisResponse(BaseModel):
     analyzed_frames: int
 
     frames: list[FrameAnalysis]
-    
+
+
 class MovementResult(BaseModel):
     label: str
     from_position: str
@@ -179,6 +183,7 @@ class MultiFrameComparisonResponse(BaseModel):
     person_movements: list[MovementResult]
     object_movements: list[MovementResult]
 
+
 class TrackedDetectionResponse(BaseModel):
     track_id: int
     class_name: str
@@ -189,8 +194,6 @@ class TrackedDetectionResponse(BaseModel):
     y2: float
 
 
-
-    
 class TrackedPersonResponse(BaseModel):
     track_id: int
 
@@ -206,6 +209,12 @@ class TrackedPersonResponse(BaseModel):
     y1: float
     x2: float
     y2: float
+
+    posture: str | None = None
+
+    posture_confidence: float | None = None
+
+    keypoints: list[list[float]] | None = None
 
 
 class TrackedFrameResponse(BaseModel):
