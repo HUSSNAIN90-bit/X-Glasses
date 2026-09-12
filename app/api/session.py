@@ -1,4 +1,6 @@
-from fastapi import APIRouter, File, Form, UploadFile, HTTPException
+from pathlib import Path
+
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from app.schemas.chat import ChatResponse
 from app.services.memory import save_latest_frame
@@ -10,6 +12,9 @@ router = APIRouter(
     tags=["session"],
 )
 
+FRAME_DIR = Path("data/frames")
+FRAME_DIR.mkdir(parents=True, exist_ok=True)
+
 
 @router.post("/input", response_model=ChatResponse)
 async def session_input(
@@ -17,19 +22,30 @@ async def session_input(
     command: str = Form(...),
     image: UploadFile | None = File(default=None),
 ) -> ChatResponse:
-    if not session_id.strip():
+    session_id = session_id.strip()
+    command = command.strip()
+
+    if not session_id:
         raise HTTPException(
             status_code=400,
             detail="session_id is required",
         )
 
-    if not command.strip():
+    if not command:
         raise HTTPException(
             status_code=400,
             detail="command is required",
         )
 
     if image is not None:
+        if not image.content_type or not image.content_type.startswith(
+            "image/"
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Uploaded file must be an image",
+            )
+
         image_bytes = await image.read()
 
         if not image_bytes:
@@ -38,15 +54,12 @@ async def session_input(
                 detail="Uploaded image is empty",
             )
 
-        if not image.content_type or not image.content_type.startswith("image/"):
-            raise HTTPException(
-                status_code=400,
-                detail="Uploaded file must be an image",
-            )
+        frame_path = FRAME_DIR / f"{session_id}.jpg"
+        frame_path.write_bytes(image_bytes)
 
         save_latest_frame(
             session_id=session_id,
-            image_bytes=image_bytes,
+            image_path=str(frame_path),
         )
 
     reply, intent = process_request(
