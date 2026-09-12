@@ -76,6 +76,8 @@ class PersonDetection(BaseModel):
     y1: float
     x2: float
     y2: float
+    
+    person_bbox: list[float] | None = None
 
     relative_position: str | None = None
 
@@ -206,6 +208,9 @@ class TrackedPersonResponse(BaseModel):
     y1: float
     x2: float
     y2: float
+    posture: str | None
+    posture_confidence: float | None
+    keypoints: list[list[float]] | None
 
 
 class TrackedFrameResponse(BaseModel):

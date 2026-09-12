@@ -333,6 +333,11 @@ async def analyze_frame(
                     y1=face.y1,
                     x2=face.x2,
                     y2=face.y2,
+                    person_bbox=(
+                        matched_person.bbox
+                        if matched_person
+                        else None
+                    ),
                     relative_position=(
                         horizontal_position
                     ),
@@ -1500,19 +1505,22 @@ async def track_uploaded_frames(
 
                 people.append(
                     TrackedPersonResponse(
-                        track_id=detection.track_id,
-                        name=name,
-                        recognized=(
-                            name is not None
-                        ),
-                        recognition_similarity=similarity,
-                        confidence=detection.confidence,
-                        x1=detection.x1,
-                        y1=detection.y1,
-                        x2=detection.x2,
-                        y2=detection.y2,
+                    track_id=detection.track_id,
+                    name=name,
+                    recognized=(
+                        name is not None
+                    ),
+                    recognition_similarity=similarity,
+                    confidence=detection.confidence,
+                    x1=detection.x1,
+                    y1=detection.y1,
+                    x2=detection.x2,
+                    y2=detection.y2,
+                    posture=detection.posture,
+                    posture_confidence=detection.pose_confidence,
+                    keypoints=detection.keypoints,
                     )
-                )
+)
 
                 # ------------------------------------------
                 # POSE KEYPOINTS

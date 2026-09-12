@@ -62,7 +62,7 @@ async def session_input(
             image_path=str(frame_path),
         )
 
-    reply, intent = process_request(
+    reply, intent = await process_request(
         session_id=session_id,
         message=command,
     )
