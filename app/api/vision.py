@@ -68,7 +68,7 @@ from app.services.frame_similarity import (
 )
 
 from app.services.tracking import (
-    track_frames,
+    track_pose_frames,
 )
 
 from app.services.pose import (
@@ -83,7 +83,10 @@ from app.services.track_identity import (
 from app.services.relationships import (
     HoldingState,
     detect_holding_relationships,
+    get_memory_holding_relationships,
 )
+
+from app.services.vision import detect_objects
 
 router = APIRouter(
     prefix="/api/vision",
@@ -1371,7 +1374,23 @@ async def track_uploaded_frames(
 
     temp_paths: list[str] = []
 
+    # --------------------------------------------------
+    # TEMPORAL HOLDING MEMORY
+    # --------------------------------------------------
+
+    holding_states: dict[
+        tuple[int, str],
+        HoldingState,
+    ] = {}
+
+    max_missed_frames = 3
+    min_confidence = 0.10
+
     try:
+
+        # --------------------------------------------------
+        # SAVE UPLOADED FRAMES
+        # --------------------------------------------------
 
         for image in images:
 
@@ -1384,9 +1403,7 @@ async def track_uploaded_frames(
                 delete=False,
             ) as temp_file:
 
-                image_bytes = (
-                    await image.read()
-                )
+                image_bytes = await image.read()
 
                 temp_file.write(
                     image_bytes
@@ -1398,11 +1415,11 @@ async def track_uploaded_frames(
 
             await image.close()
 
-        # ---------------------------------------------
-        # RUN YOLO26 + BYTE TRACK
-        # ---------------------------------------------
+        # --------------------------------------------------
+        # YOLO26 + BYTE TRACK + POSE
+        # --------------------------------------------------
 
-        tracked_frames = track_frames(
+        tracked_frames = track_pose_frames(
             image_paths=temp_paths,
             confidence_threshold=0.40,
         )
@@ -1411,9 +1428,17 @@ async def track_uploaded_frames(
             TrackedFrameResponse
         ] = []
 
+        # --------------------------------------------------
+        # PROCESS EACH FRAME
+        # --------------------------------------------------
+
         for index, detections in enumerate(
             tracked_frames
         ):
+
+            # ----------------------------------------------
+            # FACE RECOGNITION
+            # ----------------------------------------------
 
             associations = (
                 associate_faces_with_tracks(
@@ -1422,14 +1447,41 @@ async def track_uploaded_frames(
                 )
             )
 
+            objects = detect_objects(
+                temp_paths[index],
+                confidence_threshold=min_confidence,
+            )
+
+            # ----------------------------------------------
+            # DETECTED OBJECT CLASSES IN CURRENT FRAME
+            # ----------------------------------------------
+
+            detected_classes: set[str] = {
+                obj.class_name
+                for obj in objects
+                if obj.confidence >= min_confidence
+            }
+
             people: list[
                 TrackedPersonResponse
             ] = []
+
+            frame_relationships: list[
+                Relationship
+            ] = []
+
+            # ----------------------------------------------
+            # PROCESS TRACKED DETECTIONS
+            # ----------------------------------------------
 
             for detection in detections:
 
                 if detection.class_name != "person":
                     continue
+
+                # ------------------------------------------
+                # FACE RECOGNITION
+                # ------------------------------------------
 
                 name, similarity = (
                     associations.get(
@@ -1454,20 +1506,117 @@ async def track_uploaded_frames(
                     )
                 )
 
+                # ------------------------------------------
+                # POSE KEYPOINTS
+                # ------------------------------------------
+
+                if detection.keypoints is None:
+                    continue
+
+                # ------------------------------------------
+                # CREATE PERSON OBJECT FOR RELATIONSHIP
+                # ------------------------------------------
+
+                person = PersonDetection(
+                    face_id=(
+                        f"track-{detection.track_id}"
+                    ),
+                    person_index=detection.track_id,
+                    name=name,
+                    similarity=similarity,
+                    recognized=(
+                        name is not None
+                    ),
+                    confidence=detection.confidence,
+                    x1=detection.x1,
+                    y1=detection.y1,
+                    x2=detection.x2,
+                    y2=detection.y2,
+                    relative_position="center",
+                    vertical_position="center",
+                )
+
+                # ------------------------------------------
+                # UPDATE STATES FOR OBJECTS THAT DISAPPEARED
+                # ------------------------------------------
+
+                for (
+                    state_key,
+                    state,
+                ) in holding_states.items():
+
+                    track_id, class_name = state_key
+
+                    if track_id != detection.track_id:
+                        continue
+
+                    if class_name in detected_classes:
+                        continue
+
+                    if not state.holding:
+                        continue
+
+                    state.missed_frames += 1
+
+                    if (
+                        state.missed_frames
+                        > max_missed_frames
+                    ):
+                        state.holding = False
+                        state.missed_frames = 0
+                        state.last_confidence = 0.0
+
+                # ------------------------------------------
+                # DETECT CURRENT HOLDING
+                # ------------------------------------------
+
+                detect_holding_relationships(
+                    person=person,
+                    keypoints=detection.keypoints,
+                    objects=objects,
+                    states=holding_states,
+                    min_confidence=min_confidence,
+                    max_missed_frames=max_missed_frames,
+                )
+
+                # ------------------------------------------
+                # GET MEMORY RELATIONSHIPS
+                # ------------------------------------------
+
+                memory_relationships = (
+                    get_memory_holding_relationships(
+                        person=person,
+                        states=holding_states,
+                    )
+                )
+
+                # ------------------------------------------
+                # CONVERT TO API RELATIONSHIPS
+                # ------------------------------------------
+
+                frame_relationships.extend(
+                    Relationship(
+                        subject=relationship.subject,
+                        relation=relationship.relation,
+                        object=relationship.object,
+                        confidence=relationship.confidence,
+                    )
+                    for relationship in memory_relationships
+                )
+
+            # ----------------------------------------------
+            # BUILD FRAME RESPONSE
+            # ----------------------------------------------
+
             frames.append(
                 TrackedFrameResponse(
                     index=index,
+
                     detections=[
                         TrackedDetectionResponse(
-                            track_id=(
-                                detection.track_id
-                            ),
-                            class_name=(
-                                detection.class_name
-                            ),
-                            confidence=(
-                                detection.confidence
-                            ),
+                            track_id=detection.track_id,
+                            class_name=detection.class_name,
+                            confidence=detection.confidence,
                             x1=detection.x1,
                             y1=detection.y1,
                             x2=detection.x2,
@@ -1475,9 +1624,16 @@ async def track_uploaded_frames(
                         )
                         for detection in detections
                     ],
+
                     people=people,
+
+                    relationships=frame_relationships,
                 )
             )
+
+        # --------------------------------------------------
+        # FINAL RESPONSE
+        # --------------------------------------------------
 
         return TrackingResponse(
             success=True,
@@ -1487,7 +1643,6 @@ async def track_uploaded_frames(
     finally:
 
         for path in temp_paths:
-
             Path(path).unlink(
                 missing_ok=True
             )

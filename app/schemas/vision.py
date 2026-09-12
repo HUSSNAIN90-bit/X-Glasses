@@ -219,6 +219,12 @@ class TrackedFrameResponse(BaseModel):
         TrackedPersonResponse
     ]
 
+    relationships: list[
+        Relationship
+    ] = Field(
+        default_factory=lambda: list[Relationship](),
+    )
+
 
 class TrackingResponse(BaseModel):
     success: bool
