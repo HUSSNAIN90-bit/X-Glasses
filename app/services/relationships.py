@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 from app.schemas.vision import Detection, PersonDetection
 
+from dataclasses import dataclass
+from typing import Optional
 
 @dataclass
 class ObjectRelationship:
@@ -11,7 +13,11 @@ class ObjectRelationship:
     relation: str
     object: str
     confidence: float
-
+@dataclass
+class HoldingState:
+    holding: bool = False
+    missed_frames: int = 0
+    last_confidence: float = 0.0
 
 HANDHELD_OBJECTS = {
     "cell phone",
@@ -23,6 +29,44 @@ HANDHELD_OBJECTS = {
     "camera",
 }
 
+def adaptive_hand_near_object(
+    keypoints: list[list[float]],
+    object_bbox: list[float],
+    person_bbox: list[float],
+    distance_ratio: float = 0.25,
+) -> bool:
+    """
+    Check whether either wrist is close to an object.
+
+    Distance threshold scales with the person's height,
+    making the check more robust across different image sizes.
+    """
+
+    if len(person_bbox) != 4:
+        return False
+
+    person_height = person_bbox[3] - person_bbox[1]
+
+    if person_height <= 0:
+        return False
+
+    threshold = person_height * distance_ratio
+
+    hands = get_hand_points(keypoints)
+
+    object_x, object_y = calculate_center(object_bbox)
+
+    for hand_x, hand_y in hands:
+
+        distance = (
+            (hand_x - object_x) ** 2
+            + (hand_y - object_y) ** 2
+        ) ** 0.5
+
+        if distance <= threshold:
+            return True
+
+    return False
 
 def calculate_center(
     bbox: list[float],
@@ -149,3 +193,138 @@ def is_hand_near_object(
         point_near_bbox(hand, object_bbox)
         for hand in hands
     )
+    
+def update_holding_state(
+    state: HoldingState,
+    detected_near_hand: bool,
+    max_missed_frames: int = 3,
+    confidence: float = 0.0,
+) -> HoldingState:
+
+    if detected_near_hand:
+        state.holding = True
+        state.missed_frames = 0
+
+        if confidence > 0:
+            state.last_confidence = confidence
+
+        return state
+
+    if not state.holding:
+        return state
+
+    state.missed_frames += 1
+
+    if state.missed_frames > max_missed_frames:
+        state.holding = False
+        state.missed_frames = 0
+        state.last_confidence = 0.0
+
+    return state
+
+def select_best_objects(
+    objects: list[Detection],
+    min_confidence: float = 0.10,
+) -> list[Detection]:
+    best_by_class: dict[str, Detection] = {}
+
+    for obj in objects:
+        if obj.class_name not in HANDHELD_OBJECTS:
+            continue
+
+        if obj.confidence < min_confidence:
+            continue
+
+        current = best_by_class.get(obj.class_name)
+
+        if current is None or obj.confidence > current.confidence:
+            best_by_class[obj.class_name] = obj
+
+    return list(best_by_class.values())
+
+def detect_holding_relationships(
+    person: PersonDetection,
+    keypoints: list[list[float]],
+    objects: list[Detection],
+    states: dict[tuple[int, str], HoldingState],
+    min_confidence: float = 0.10,
+    max_missed_frames: int = 3,
+) -> list[ObjectRelationship]:
+
+    relationships: list[ObjectRelationship] = []
+
+    selected_objects = select_best_objects(
+        objects=objects,
+        min_confidence=min_confidence,
+    )
+
+    for obj in selected_objects:
+
+        if obj.class_name not in HANDHELD_OBJECTS:
+            continue
+
+        near_hand = adaptive_hand_near_object(
+            keypoints=keypoints,
+            object_bbox=obj.bbox,
+            person_bbox=[
+                person.x1,
+                person.y1,
+                person.x2,
+                person.y2,
+            ],
+        )
+
+        state_key = (
+            person.person_index,
+            obj.class_name,
+        )
+
+        state = states.setdefault(
+            state_key,
+            HoldingState(),
+        )
+
+        update_holding_state(
+            state=state,
+            detected_near_hand=near_hand,
+            max_missed_frames=max_missed_frames,
+            confidence=obj.confidence,
+        )
+
+        if state.holding:
+            relationships.append(
+                ObjectRelationship(
+                    subject=f"person_{person.person_index}",
+                    relation="holding",
+                    object=obj.class_name,
+                    confidence=state.last_confidence,
+                )
+            )
+
+    return relationships
+
+def get_memory_holding_relationships(
+    person: PersonDetection,
+    states: dict[tuple[int, str], HoldingState],
+) -> list[ObjectRelationship]:
+
+    relationships: list[ObjectRelationship] = []
+
+    for (person_index, class_name), state in states.items():
+
+        if person_index != person.person_index:
+            continue
+
+        if not state.holding:
+            continue
+
+        relationships.append(
+            ObjectRelationship(
+                subject=f"person_{person.person_index}",
+                relation="holding",
+                object=class_name,
+                confidence=state.last_confidence,
+            )
+        )
+
+    return relationships
