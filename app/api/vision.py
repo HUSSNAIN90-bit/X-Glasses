@@ -1447,10 +1447,18 @@ async def track_uploaded_frames(
                 )
             )
 
-            objects = detect_objects(
-                temp_paths[index],
-                confidence_threshold=min_confidence,
-            )
+            objects: list[Detection] = [
+                Detection(
+                    class_name=detection.class_name,
+                    confidence=detection.confidence,
+                    x1=detection.x1,
+                    y1=detection.y1,
+                    x2=detection.x2,
+                    y2=detection.y2,
+                )
+                for detection in detections
+                if detection.class_name != "person"
+            ]
 
             # ----------------------------------------------
             # DETECTED OBJECT CLASSES IN CURRENT FRAME

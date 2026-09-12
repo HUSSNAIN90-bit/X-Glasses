@@ -4,9 +4,6 @@ from dataclasses import dataclass
 
 from app.schemas.vision import Detection, PersonDetection
 
-from dataclasses import dataclass
-from typing import Optional
-
 @dataclass
 class ObjectRelationship:
     subject: str
@@ -33,13 +30,13 @@ def adaptive_hand_near_object(
     keypoints: list[list[float]],
     object_bbox: list[float],
     person_bbox: list[float],
-    distance_ratio: float = 0.25,
+    distance_ratio: float = 0.10,
 ) -> bool:
     """
-    Check whether either wrist is close to an object.
+    Detect whether a wrist is close to the actual object bounding box.
 
-    Distance threshold scales with the person's height,
-    making the check more robust across different image sizes.
+    The threshold scales with the person's height so the behavior
+    remains reasonably consistent across different image sizes.
     """
 
     if len(person_bbox) != 4:
@@ -52,15 +49,30 @@ def adaptive_hand_near_object(
 
     threshold = person_height * distance_ratio
 
-    hands = get_hand_points(keypoints)
+    x1, y1, x2, y2 = object_bbox
 
-    object_x, object_y = calculate_center(object_bbox)
+    hands = get_hand_points(keypoints)
 
     for hand_x, hand_y in hands:
 
+        # Distance from hand point to the object bounding box.
+        if x1 <= hand_x <= x2:
+            dx = 0.0
+        elif hand_x < x1:
+            dx = x1 - hand_x
+        else:
+            dx = hand_x - x2
+
+        if y1 <= hand_y <= y2:
+            dy = 0.0
+        elif hand_y < y1:
+            dy = y1 - hand_y
+        else:
+            dy = hand_y - y2
+
         distance = (
-            (hand_x - object_x) ** 2
-            + (hand_y - object_y) ** 2
+            dx ** 2
+            + dy ** 2
         ) ** 0.5
 
         if distance <= threshold:
@@ -262,7 +274,9 @@ def detect_holding_relationships(
 
         if obj.class_name not in HANDHELD_OBJECTS:
             continue
-
+        
+        
+        
         near_hand = adaptive_hand_near_object(
             keypoints=keypoints,
             object_bbox=obj.bbox,
@@ -273,6 +287,16 @@ def detect_holding_relationships(
                 person.y2,
             ],
         )
+        print(
+    f"[HOLDING DEBUG] "
+    f"person={person.person_index} "
+    f"object={obj.class_name} "
+    f"confidence={obj.confidence:.2f} "
+    f"near_hand={near_hand} "
+    f"person_bbox={person.bbox} "
+    f"object_bbox={obj.bbox} "
+    f"hands={get_hand_points(keypoints)}"
+            )           
 
         state_key = (
             person.person_index,
