@@ -27,6 +27,12 @@ class VisionResponse(BaseModel):
     detections: list[Detection]
 
 
+class PoseDetection(BaseModel):
+    person_index: int
+    posture: str
+    confidence: float
+    bbox: list[float]
+
 # =========================================================
 # PERSON / FACE DETECTION
 # =========================================================
@@ -56,6 +62,10 @@ class PersonDetection(BaseModel):
 
     vertical_position: str | None = None
 
+    posture: str | None = None
+
+    posture_confidence: float | None = None
+
 
 # =========================================================
 # COMBINED SINGLE-FRAME VISION
@@ -70,6 +80,7 @@ class CombinedVisionResponse(BaseModel):
 
     people: list[PersonDetection]
 
+    poses: list[PoseDetection]
 
 # =========================================================
 # FRAME QUALITY

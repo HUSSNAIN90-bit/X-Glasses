@@ -23,6 +23,7 @@ from app.schemas.vision import (
     MultiFrameComparisonResponse,
     MovementResult,
     PersonDetection,
+    PoseDetection,
     TrackingResponse,
     TrackedFrameResponse,
     TrackedDetectionResponse,
@@ -67,6 +68,11 @@ from app.services.frame_similarity import (
 
 from app.services.tracking import (
     track_frames,
+)
+
+from app.services.pose import (
+    detect_pose,
+    match_pose_to_person,
 )
 
 from app.services.track_identity import (
@@ -178,6 +184,10 @@ async def analyze_frame(
             )
         )
 
+        poses: list[PoseDetection] = detect_pose(
+            temp_path
+        )
+
         # =================================================
         # INSIGHTFACE RECOGNITION
         # =================================================
@@ -271,6 +281,23 @@ async def analyze_frame(
                 )
             )
 
+            matched_pose = None
+
+            if matched_person_index is not None:
+                matched_person = person_objects[
+                    matched_person_index
+                ]
+
+                matched_pose = match_pose_to_person(
+                    person_bbox=(
+                        matched_person.x1,
+                        matched_person.y1,
+                        matched_person.x2,
+                        matched_person.y2,
+                    ),
+                    poses=poses,
+                )
+
             # ---------------------------------------------
             # SAVE PERSON RESULT
             # ---------------------------------------------
@@ -303,6 +330,16 @@ async def analyze_frame(
                     vertical_position=(
                         vertical_position
                     ),
+                    posture=(
+                        matched_pose.posture
+                        if matched_pose
+                        else None
+                    ),
+                    posture_confidence=(
+                        matched_pose.confidence
+                        if matched_pose
+                        else None
+                    ),
                 )
             )
 
@@ -326,6 +363,7 @@ async def analyze_frame(
             scene=scene_description,
             objects=objects,
             people=people,
+            poses=poses,
         )
 
     finally:
