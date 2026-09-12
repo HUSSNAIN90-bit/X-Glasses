@@ -24,6 +24,7 @@ from app.schemas.vision import (
     MovementResult,
     PersonDetection,
     PoseDetection,
+    Relationship,
     TrackingResponse,
     TrackedFrameResponse,
     TrackedDetectionResponse,
@@ -77,6 +78,11 @@ from app.services.pose import (
 
 from app.services.track_identity import (
     associate_faces_with_tracks,
+)
+
+from app.services.relationships import (
+    HoldingState,
+    detect_holding_relationships,
 )
 
 router = APIRouter(
@@ -353,7 +359,43 @@ async def analyze_frame(
                 people=people,
             )
         )
+        
+        relationships: list[Relationship] = []
+        holding_states: dict[tuple[int, str], HoldingState] = {}
 
+        for person in people:
+            if person.person_index is None:
+                continue
+
+            matched_pose = next(
+                (
+                    pose
+                    for pose in poses
+                    if pose.person_index == person.person_index
+                ),
+                None,
+            )
+
+            if matched_pose is None:
+                continue
+
+            detected_relationships = detect_holding_relationships(
+                person=person,
+                keypoints=matched_pose.keypoints,
+                objects=objects,
+                states=holding_states,
+            )
+
+            relationships.extend(
+                Relationship(
+                    subject=relationship.subject,
+                    relation=relationship.relation,
+                    object=relationship.object,
+                    confidence=relationship.confidence,
+                )
+                for relationship in detected_relationships
+            )
+        
         # =================================================
         # FINAL RESPONSE
         # =================================================
@@ -364,6 +406,7 @@ async def analyze_frame(
             objects=objects,
             people=people,
             poses=poses,
+            relationships=relationships,
         )
 
     finally:

@@ -43,6 +43,15 @@ class PoseDetection(BaseModel):
     bbox: list[float]
     keypoints: list[list[float]]
 
+class Relationship(BaseModel):
+    subject: str
+    relation: str
+    object: str
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+    )
+
 # =========================================================
 # PERSON / FACE DETECTION
 # =========================================================
@@ -100,6 +109,10 @@ class CombinedVisionResponse(BaseModel):
     people: list[PersonDetection]
 
     poses: list[PoseDetection]
+
+    relationships: list[Relationship] = Field(
+        default_factory=lambda: list[Relationship](),
+    )
 
 # =========================================================
 # FRAME QUALITY
