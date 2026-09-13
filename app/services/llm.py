@@ -1,5 +1,6 @@
 from typing import cast
 import json
+import re
 
 from groq import AsyncGroq
 from groq.types.chat import ChatCompletionMessageParam
@@ -16,6 +17,26 @@ client = AsyncGroq(
     api_key=settings.llm_api_key,
 )
 from app.schemas.chat import IntentResult
+
+
+def clean_llm_response(text: str) -> str:
+    if not text:
+        return ""
+
+    text = re.sub(
+        r"<think>.*?</think>",
+        "",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    text = re.sub(
+        r"<think>.*$",
+        "",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+
+    return text.strip()
 
 # =========================================================
 # GENERAL CHAT
@@ -72,11 +93,11 @@ async def generate_response(
         temperature=0.7,
     )
 
-    content: str | None = (
-        response.choices[0].message.content
+    content = clean_llm_response(
+        response.choices[0].message.content or ""
     )
 
-    if content is None:
+    if not content:
         raise RuntimeError(
             "LLM returned an empty response."
         )
@@ -161,11 +182,11 @@ async def describe_detections(
         temperature=0.3,
     )
 
-    content: str | None = (
-        response.choices[0].message.content
+    content = clean_llm_response(
+        response.choices[0].message.content or ""
     )
 
-    if content is None:
+    if not content:
         raise RuntimeError(
             "LLM returned an empty vision response."
         )
@@ -342,13 +363,11 @@ async def describe_scene(
         temperature=0.3,
     )
 
-    content: str | None = (
-        response.choices[0]
-        .message
-        .content
+    content = clean_llm_response(
+        response.choices[0].message.content or ""
     )
 
-    if content is None:
+    if not content:
         raise RuntimeError(
             "LLM returned an empty scene response."
         )
@@ -414,9 +433,11 @@ async def parse_intent(
         temperature=0,
     )
 
-    content = response.choices[0].message.content
+    content = clean_llm_response(
+        response.choices[0].message.content or ""
+    )
 
-    if content is None:
+    if not content:
         raise RuntimeError(
             "Intent parser returned an empty response."
         )
