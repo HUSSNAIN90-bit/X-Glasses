@@ -1,3 +1,5 @@
+import asyncio
+
 import cv2
 
 from app.schemas.chat import (
@@ -27,6 +29,10 @@ from app.services.vision import (
 
 from app.services.face_database import (
     resolve_person_reference,
+)
+from app.services.face_enrollment import (
+    enroll_introduced_person,
+    parse_face_introduction,
 )
 
 
@@ -146,6 +152,23 @@ async def process_request(
     session_id: str,
     message: str,
 ) -> tuple[str, Intent]:
+
+    introduction = parse_face_introduction(message)
+    if introduction is not None:
+        latest_frame = get_latest_frame(session_id)
+        if latest_frame is None:
+            response = "I need a clear camera frame before I can save them."
+        else:
+            enrollment = await asyncio.to_thread(
+                enroll_introduced_person,
+                latest_frame,
+                introduction,
+            )
+            response = enrollment.reply
+
+        add_message(session_id=session_id, role="user", content=message)
+        add_message(session_id=session_id, role="assistant", content=response)
+        return response, "face_enrollment"
 
     # -----------------------------------------------------
     # AI INTENT PARSER

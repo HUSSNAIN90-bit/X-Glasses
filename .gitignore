@@ -3,3 +3,8 @@ __pycache__/
 .env
 *.pyc
 tests
+!tests/
+tests/*
+!tests/test_vision_command.py
+!tests/test_face_enrollment.py
+data/frames

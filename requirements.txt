@@ -26,6 +26,7 @@ networkx==3.6.1
 numpy==2.5.3
 nvidia-ml-py==13.610.43
 opencv-python==5.0.0.93
+openai>=2.0.0,<3.0.0
 packaging==26.3
 pillow==12.3.0
 polars==1.44.1

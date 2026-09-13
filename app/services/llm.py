@@ -1,13 +1,27 @@
-from typing import cast
+import base64
+from functools import lru_cache
 import json
 import re
+from typing import cast
 
 from groq import AsyncGroq
 from groq.types.chat import ChatCompletionMessageParam
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncOpenAI,
+    AuthenticationError,
+    BadRequestError,
+    RateLimitError,
+)
 
 from app.core.config import settings
 from app.schemas.vision import (
+    CodeDetection,
     Detection,
+    FaceMatch,
+    OCRResult,
     PersonDetection,
 )
 from app.services.memory import Message
@@ -19,24 +33,224 @@ client = AsyncGroq(
 from app.schemas.chat import IntentResult
 
 
+class VisionLLMError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_status_code: int | None = None,
+        provider_error_type: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.provider_status_code = provider_status_code
+        self.provider_error_type = provider_error_type
+
+
+class VisionLLMConfigurationError(VisionLLMError):
+    pass
+
+
+class VisionLLMAuthenticationError(VisionLLMError):
+    pass
+
+
+class VisionLLMTimeoutError(VisionLLMError):
+    pass
+
+
+class VisionLLMRequestError(VisionLLMError):
+    pass
+
+
+VISION_ASSISTANT_INSTRUCTIONS = """You are the vision assistant for X-Glasses.
+
+Analyze the supplied image and answer the user's command directly.
+Use the image as the primary visual source. Use YOLO, OCR, barcode, QR, and
+face-recognition metadata only as supporting context. Do not invent facts.
+Do not identify a person unless trusted face-recognition metadata provides the
+identity. Never invent an SKU, model number, price, barcode, or serial number.
+Do not expose internal reasoning, analysis, planning, chain-of-thought, hidden
+thoughts, or model deliberation. Return only the final answer intended for the
+user. Keep normal answers to 1-2 short sentences unless the user explicitly
+requests more detail. Use simple natural language suitable for speech. If the
+requested information cannot be determined from the image or verified
+metadata, say so briefly."""
+
+
+@lru_cache(maxsize=1)
+def get_openai_vision_client() -> AsyncOpenAI:
+    api_key = settings.openai_api_key.strip()
+    if not api_key:
+        raise VisionLLMConfigurationError(
+            "OPENAI_API_KEY is missing from the backend environment."
+        )
+    return AsyncOpenAI(
+        api_key=api_key,
+        timeout=settings.openai_timeout_seconds,
+        max_retries=0,
+    )
+
+
 def clean_llm_response(text: str) -> str:
+    """Return only user-facing text; never expose model reasoning."""
     if not text:
         return ""
 
     text = re.sub(
-        r"<think>.*?</think>",
+        r"<think\b[^>]*>.*?</think\s*>",
         "",
         text,
         flags=re.DOTALL | re.IGNORECASE,
+    )
+    unclosed_think = re.search(r"<think\b[^>]*>", text, flags=re.IGNORECASE)
+    if unclosed_think:
+        hidden_tail = text[unclosed_think.end():]
+        answer_match = re.search(
+            r"(?:^|\n)\s*(?:final\s+answer|answer)\s*:\s*",
+            hidden_tail,
+            flags=re.IGNORECASE,
+        )
+        text = (
+            text[:unclosed_think.start()] + hidden_tail[answer_match.end():]
+            if answer_match
+            else text[:unclosed_think.start()]
+        )
+
+    def clean_fence(match: re.Match[str]) -> str:
+        language = match.group(1).strip().lower()
+        body = match.group(2)
+        if language in {
+            "analysis",
+            "reasoning",
+            "think",
+            "thought",
+            "planning",
+        }:
+            return ""
+        return body
+
+    text = re.sub(
+        r"```([^\n`]*)\n?(.*?)```",
+        clean_fence,
+        text,
+        flags=re.DOTALL,
     )
     text = re.sub(
-        r"<think>.*$",
+        r"^\s*(?:analysis|reasoning|chain\s+of\s+thought|internal\s+analysis|"
+        r"internal\s+planning|planning|model\s+deliberation)\s*:\s*.*$",
         "",
         text,
-        flags=re.DOTALL | re.IGNORECASE,
+        flags=re.MULTILINE | re.IGNORECASE,
     )
+    text = re.sub(
+        r"^\s*(?:final\s+answer|answer)\s*:\s*",
+        "",
+        text,
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+    text = re.sub(r"</?think\b[^>]*>", "", text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip()
 
-    return text.strip()
+
+async def describe_image_command(
+    image_bytes: bytes,
+    command: str,
+    detected_objects: list[Detection] | None = None,
+    face_matches: list[FaceMatch] | None = None,
+    ocr_results: list[OCRResult] | None = None,
+    detected_codes: list[CodeDetection] | None = None,
+) -> str:
+    if not image_bytes:
+        raise VisionLLMRequestError("The selected image is empty.")
+
+    metadata = {
+        "objects": [
+            {
+                "label": item.class_name,
+                "confidence": round(item.confidence, 3),
+                "horizontal_position": item.relative_position,
+                "vertical_position": item.vertical_position,
+            }
+            for item in (detected_objects or [])[:30]
+        ],
+        "recognized_people": [
+            {
+                "name": match.name,
+                "confidence": (
+                    round(match.confidence, 3)
+                    if match.confidence is not None
+                    else None
+                ),
+            }
+            for match in (face_matches or [])
+            if match.recognized and match.name
+        ],
+        "ocr": [
+            {"text": item.text, "confidence": item.confidence}
+            for item in (ocr_results or [])[:30]
+        ],
+        "codes": [
+            {"format": item.format, "value": item.value}
+            for item in (detected_codes or [])[:10]
+        ],
+    }
+    prompt = (
+        f"User command: {command.strip()}\n"
+        "Verified local detector metadata (supporting context only):\n"
+        f"{json.dumps(metadata, ensure_ascii=True, separators=(',', ':'))}"
+    )
+    image_b64 = base64.b64encode(image_bytes).decode("ascii")
+
+    request_options = {
+        "model": settings.openai_vision_model,
+        "instructions": VISION_ASSISTANT_INSTRUCTIONS,
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:image/jpeg;base64,{image_b64}",
+                        "detail": "auto",
+                    },
+                ],
+            }
+        ],
+        "reasoning": {"effort": "low"},
+        "max_output_tokens": 110,
+        "store": False,
+    }
+    if settings.openai_vision_service_tier.strip():
+        request_options["service_tier"] = settings.openai_vision_service_tier.strip()
+
+    try:
+        response = await get_openai_vision_client().responses.create(
+            **request_options,
+        )
+    except AuthenticationError as exc:
+        raise VisionLLMAuthenticationError(
+            "OpenAI rejected the backend credentials."
+        ) from exc
+    except (APITimeoutError, TimeoutError) as exc:
+        raise VisionLLMTimeoutError("OpenAI vision request timed out.") from exc
+    except BadRequestError as exc:
+        raise VisionLLMRequestError(
+            "OpenAI rejected the vision request.",
+            provider_status_code=exc.status_code,
+            provider_error_type=type(exc).__name__,
+        ) from exc
+    except (APIConnectionError, RateLimitError, APIStatusError) as exc:
+        raise VisionLLMError(
+            "OpenAI vision is temporarily unavailable.",
+            provider_status_code=getattr(exc, "status_code", None),
+            provider_error_type=type(exc).__name__,
+        ) from exc
+
+    content = clean_llm_response(response.output_text or "")
+    if not content:
+        raise VisionLLMError("OpenAI vision returned an empty response.")
+    return content
 
 # =========================================================
 # GENERAL CHAT

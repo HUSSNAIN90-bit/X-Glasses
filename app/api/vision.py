@@ -1,9 +1,14 @@
+import asyncio
 import cv2
+import hashlib
+import logging
 import shutil
+import time
+import uuid
 
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-# from typing import Any
+from typing import Any, Callable
 
 from fastapi import (
     APIRouter,
@@ -12,16 +17,21 @@ from fastapi import (
     HTTPException,
     UploadFile,
 )
+from fastapi.responses import JSONResponse
 
 from app.schemas.vision import (
+    CodeDetection,
     CombinedVisionResponse,
+    CommandVisionResponse,
     Detection,
+    FaceMatch,
     FrameAnalysis,
     FrameQuality,
     FrameQualityBatchResponse,
     MultiFrameAnalysisResponse,
     MultiFrameComparisonResponse,
     MovementResult,
+    OCRResult,
     PersonDetection,
     PoseDetection,
     Relationship,
@@ -29,6 +39,7 @@ from app.schemas.vision import (
     TrackedFrameResponse,
     TrackedDetectionResponse,
     TrackedPersonResponse,
+    VisionProcessing,
 )
 
 from app.services.vision import (
@@ -44,6 +55,12 @@ from app.services.face_recognition import (
 
 from app.services.llm import (
     describe_scene,
+    describe_image_command,
+    VisionLLMAuthenticationError,
+    VisionLLMConfigurationError,
+    VisionLLMError,
+    VisionLLMRequestError,
+    VisionLLMTimeoutError,
 )
 
 from app.services.memory import (
@@ -53,7 +70,16 @@ from app.services.memory import (
 from app.services.frame_quality import (
     calculate_blur_score,
     calculate_brightness,
+    evaluate_frame_quality,
     is_frame_good,
+    optimize_image_for_vision,
+)
+
+from app.services.code_detection import detect_codes
+from app.core.config import settings
+from app.services.face_enrollment import (
+    enroll_introduced_person,
+    parse_face_introduction,
 )
 
 from app.services.frame_comparison import (
@@ -92,7 +118,488 @@ router = APIRouter(
     prefix="/api/vision",
     tags=["Vision"],
 )
+command_router = APIRouter(
+    prefix="/vision",
+    tags=["Vision"],
+)
 
+logger = logging.getLogger(__name__)
+
+IMAGE_SUFFIXES = {
+    "image/bmp": ".bmp",
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/tiff": ".tiff",
+    "image/webp": ".webp",
+}
+ALLOWED_IMAGE_SUFFIXES = set(IMAGE_SUFFIXES.values()) | {".jpeg"}
+
+
+# =========================================================
+# COMMAND-TRIGGERED MULTI-FRAME VISION
+# =========================================================
+
+@router.post("/command", response_model=CommandVisionResponse)
+@command_router.post("/command", response_model=CommandVisionResponse)
+@router.post(
+    "/analyze-command-multi",
+    response_model=CommandVisionResponse,
+    include_in_schema=False,
+)
+async def analyze_command_multi(
+    session_id: str = Form(...),
+    command: str = Form(...),
+    language: str = Form("en"),
+    frames: list[UploadFile] | None = File(None),
+    images: list[UploadFile] | None = File(None),
+) -> Any:
+    request_id = str(uuid.uuid4())
+    request_started = time.perf_counter()
+    session_id = session_id.strip()
+    command = command.strip()
+    language = language.strip() or "en"
+
+    if not session_id or len(session_id) > 128:
+        raise HTTPException(status_code=400, detail="A valid session_id is required.")
+    if not command:
+        raise HTTPException(status_code=400, detail="Command is required.")
+    if len(command) > 2000:
+        raise HTTPException(status_code=400, detail="Command is too long.")
+    if len(language) > 16:
+        raise HTTPException(status_code=400, detail="Language value is too long.")
+    if frames and images:
+        raise HTTPException(
+            status_code=400,
+            detail="Send frames using either 'frames' or legacy 'images', not both.",
+        )
+
+    uploads = frames or images or []
+    if not uploads:
+        raise HTTPException(status_code=400, detail="At least one frame is required.")
+    if len(uploads) > 3:
+        raise HTTPException(status_code=400, detail="Send no more than 3 frames.")
+
+    safe_session_id = session_id.replace("\r", "").replace("\n", "")
+    logger.info(
+        "vision_command received request_id=%s session_id=%s frame_count=%d",
+        request_id,
+        safe_session_id,
+        len(uploads),
+    )
+
+    frame_quality: list[FrameQuality] = []
+    saved: list[tuple[int, str]] = []
+    detector_status = {
+        "yolo": "not_run",
+        "face_recognition": "not_run",
+        "ocr": "unavailable",
+        "barcode_qr": "not_run",
+    }
+    durations_ms: dict[str, float] = {}
+
+    def processing(
+        *,
+        mode: str = "command_triggered",
+        selected_frame: int | None = None,
+        quality_score: float | None = None,
+        llm_attempted: bool = False,
+        llm_used: bool = False,
+    ) -> VisionProcessing:
+        return VisionProcessing(
+            mode=mode,
+            request_id=request_id,
+            frame_count=len(saved),
+            selected_frame=selected_frame,
+            quality_score=quality_score,
+            llm_attempted=llm_attempted,
+            llm_used=llm_used,
+            ai_called=llm_attempted,
+            yolo_verified=detector_status["yolo"] == "ok",
+            detectors=detector_status,
+            durations_ms=durations_ms,
+            frame_quality=frame_quality,
+        )
+
+    def error_response(
+        *,
+        status_code: int,
+        reply: str,
+        selected_frame: int | None = None,
+        quality_score: float | None = None,
+        objects: list[Detection] | None = None,
+        face_matches: list[FaceMatch] | None = None,
+        barcodes: list[CodeDetection] | None = None,
+        llm_attempted: bool = False,
+    ) -> JSONResponse:
+        durations_ms.setdefault(
+            "total",
+            round((time.perf_counter() - request_started) * 1000, 1),
+        )
+        response = CommandVisionResponse(
+            success=False,
+            session_id=session_id,
+            command=command,
+            reply=reply,
+            language=language,
+            objects=objects or [],
+            face_matches=face_matches or [],
+            ocr=[],
+            barcodes=barcodes or [],
+            processing=processing(
+                selected_frame=selected_frame,
+                quality_score=quality_score,
+                llm_attempted=llm_attempted,
+            ),
+        )
+        return JSONResponse(
+            status_code=status_code,
+            content=response.model_dump(mode="json"),
+        )
+
+    async def save_selected_frame(selected_path: str) -> None:
+        frames_dir = Path(__file__).resolve().parents[2] / "data" / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        frame_name = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:32]
+        latest_frame_path = frames_dir / f"{frame_name}.jpg"
+        await asyncio.to_thread(shutil.copyfile, selected_path, latest_frame_path)
+        save_latest_frame(session_id=session_id, image_path=str(latest_frame_path))
+
+    try:
+        for index, image in enumerate(uploads):
+            if image.content_type and not image.content_type.startswith("image/"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Every uploaded frame must be an image.",
+                )
+
+            image_bytes = await image.read(settings.max_vision_frame_bytes + 1)
+            await image.close()
+            if not image_bytes:
+                raise HTTPException(status_code=400, detail="Uploaded frames cannot be empty.")
+            if len(image_bytes) > settings.max_vision_frame_bytes:
+                raise HTTPException(
+                    status_code=413,
+                    detail="An uploaded frame is too large.",
+                )
+
+            suffix = IMAGE_SUFFIXES.get(image.content_type or "")
+            if suffix is None:
+                candidate_suffix = Path(image.filename or "").suffix.lower()
+                suffix = (
+                    candidate_suffix
+                    if candidate_suffix in ALLOWED_IMAGE_SUFFIXES
+                    else ".jpg"
+                )
+
+            with NamedTemporaryFile(suffix=suffix, delete=False) as temp_file:
+                temp_path = temp_file.name
+                temp_file.write(image_bytes)
+            saved.append((index, temp_path))
+
+        quality_started = time.perf_counter()
+        metrics = await asyncio.gather(
+            *[
+                asyncio.to_thread(
+                    evaluate_frame_quality,
+                    path,
+                    80.0,
+                    35.0,
+                    220.0,
+                )
+                for _, path in saved
+            ]
+        )
+        durations_ms["quality"] = round(
+            (time.perf_counter() - quality_started) * 1000,
+            1,
+        )
+
+        for (index, _), item in zip(saved, metrics):
+            if item.reason == "invalid_image":
+                raise HTTPException(
+                    status_code=400,
+                    detail="One or more uploaded frames is not a valid image.",
+                )
+            if item.width * item.height > settings.max_vision_frame_pixels:
+                raise HTTPException(
+                    status_code=413,
+                    detail="An uploaded frame has oversized dimensions.",
+                )
+            frame_quality.append(
+                FrameQuality(
+                    index=index,
+                    good=item.good,
+                    blur_score=item.blur_score,
+                    brightness=item.brightness,
+                    width=item.width,
+                    height=item.height,
+                    exposure_score=item.exposure_score,
+                    quality_score=item.quality_score,
+                    reason=item.reason,
+                )
+            )
+
+        candidates = [
+            (idx, path, q) for (idx, path), q in zip(saved, frame_quality) if q.good
+        ]
+        if not candidates:
+            logger.info(
+                "vision_command rejected request_id=%s reason=no_usable_frame",
+                request_id,
+            )
+            return error_response(
+                status_code=200,
+                reply="Please hold the camera steady and try again.",
+            )
+
+        selected_idx, selected_path, selected_quality = max(
+            candidates,
+            key=lambda item: item[2].quality_score,
+        )
+        logger.info(
+            "vision_command selected request_id=%s frame=%d quality_score=%.3f",
+            request_id,
+            selected_idx,
+            selected_quality.quality_score,
+        )
+
+        introduction = parse_face_introduction(command)
+        if introduction is not None:
+            enrollment_started = time.perf_counter()
+            enrollment = await asyncio.to_thread(
+                enroll_introduced_person,
+                selected_path,
+                introduction,
+            )
+            durations_ms["face_enrollment"] = round(
+                (time.perf_counter() - enrollment_started) * 1000,
+                1,
+            )
+            detector_status["face_recognition"] = (
+                "enrolled" if enrollment.success else "rejected"
+            )
+            await save_selected_frame(selected_path)
+            durations_ms["total"] = round(
+                (time.perf_counter() - request_started) * 1000,
+                1,
+            )
+            logger.info(
+                "vision_command enrollment_completed request_id=%s success=%s total_ms=%.1f",
+                request_id,
+                enrollment.success,
+                durations_ms["total"],
+            )
+            return CommandVisionResponse(
+                success=enrollment.success,
+                session_id=session_id,
+                command=command,
+                reply=enrollment.reply,
+                language=language,
+                objects=[],
+                face_matches=[],
+                ocr=[],
+                barcodes=[],
+                processing=processing(
+                    mode="face_enrollment",
+                    selected_frame=selected_idx,
+                    quality_score=selected_quality.quality_score,
+                ),
+            )
+
+        async def run_detector(
+            name: str,
+            detector: Callable[..., Any],
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
+            started = time.perf_counter()
+            try:
+                result = await asyncio.to_thread(detector, *args, **kwargs)
+                detector_status[name] = "ok"
+                return result
+            except Exception as exc:
+                detector_status[name] = "failed"
+                logger.warning(
+                    "vision_command detector_failed request_id=%s detector=%s error_type=%s",
+                    request_id,
+                    name,
+                    type(exc).__name__,
+                )
+                return []
+            finally:
+                durations_ms[name] = round(
+                    (time.perf_counter() - started) * 1000,
+                    1,
+                )
+                logger.info(
+                    "vision_command detector_completed request_id=%s detector=%s "
+                    "status=%s duration_ms=%.1f",
+                    request_id,
+                    name,
+                    detector_status[name],
+                    durations_ms[name],
+                )
+
+        objects, recognized_faces, raw_codes = await asyncio.gather(
+            run_detector(
+                "yolo",
+                detect_objects,
+                image_path=selected_path,
+                confidence_threshold=0.40,
+            ),
+            run_detector("face_recognition", recognize_faces, selected_path),
+            run_detector("barcode_qr", detect_codes, selected_path),
+        )
+        face_matches = [
+            FaceMatch(
+                name=face.name,
+                recognized=face.name is not None,
+                confidence=face.similarity if face.name is not None else None,
+                detection_confidence=face.confidence,
+            )
+            for face in recognized_faces
+        ]
+        barcodes = [
+            CodeDetection(format=code.format, value=code.value)
+            for code in raw_codes
+        ]
+        ocr_results: list[OCRResult] = []
+
+        try:
+            optimized_image = await asyncio.to_thread(
+                optimize_image_for_vision,
+                selected_path,
+                settings.vision_max_dimension,
+                settings.vision_jpeg_quality,
+            )
+        except ValueError:
+            return error_response(
+                status_code=400,
+                reply="I couldn't read that image. Please try another frame.",
+                selected_frame=selected_idx,
+                quality_score=selected_quality.quality_score,
+                objects=objects,
+                face_matches=face_matches,
+                barcodes=barcodes,
+            )
+
+        llm_started = time.perf_counter()
+
+        def llm_error_response(
+            *,
+            status_code: int,
+            reply: str,
+            error_type: str,
+            attempted: bool,
+            provider_status_code: int | None = None,
+            provider_error_type: str | None = None,
+        ) -> JSONResponse:
+            durations_ms["openai"] = round(
+                (time.perf_counter() - llm_started) * 1000,
+                1,
+            )
+            durations_ms["total"] = round(
+                (time.perf_counter() - request_started) * 1000,
+                1,
+            )
+            logger.warning(
+                "vision_command llm_failed request_id=%s error_type=%s "
+                "provider_status=%s provider_error=%s openai_ms=%.1f",
+                request_id,
+                error_type,
+                provider_status_code,
+                provider_error_type,
+                durations_ms["openai"],
+            )
+            return error_response(
+                status_code=status_code,
+                reply=reply,
+                selected_frame=selected_idx,
+                quality_score=selected_quality.quality_score,
+                objects=objects,
+                face_matches=face_matches,
+                barcodes=barcodes,
+                llm_attempted=attempted,
+            )
+
+        try:
+            reply = await describe_image_command(
+                image_bytes=optimized_image,
+                command=command,
+                detected_objects=objects,
+                face_matches=face_matches,
+                ocr_results=ocr_results,
+                detected_codes=barcodes,
+            )
+        except VisionLLMConfigurationError:
+            return llm_error_response(
+                status_code=503,
+                reply="Vision AI is not configured on the server.",
+                error_type="configuration",
+                attempted=False,
+            )
+        except VisionLLMAuthenticationError:
+            return llm_error_response(
+                status_code=502,
+                reply="Vision AI authentication failed. Please contact support.",
+                error_type="authentication",
+                attempted=True,
+            )
+        except VisionLLMTimeoutError:
+            return llm_error_response(
+                status_code=504,
+                reply="Vision analysis took too long. Please try again.",
+                error_type="timeout",
+                attempted=True,
+            )
+        except (VisionLLMRequestError, VisionLLMError) as exc:
+            return llm_error_response(
+                status_code=502,
+                reply="I couldn't analyze the image right now. Please try again.",
+                error_type="provider",
+                attempted=True,
+                provider_status_code=exc.provider_status_code,
+                provider_error_type=exc.provider_error_type,
+            )
+        finally:
+            durations_ms["openai"] = round(
+                (time.perf_counter() - llm_started) * 1000,
+                1,
+            )
+
+        await save_selected_frame(selected_path)
+
+        durations_ms["total"] = round(
+            (time.perf_counter() - request_started) * 1000,
+            1,
+        )
+        logger.info(
+            "vision_command completed request_id=%s openai_ms=%.1f total_ms=%.1f",
+            request_id,
+            durations_ms["openai"],
+            durations_ms["total"],
+        )
+
+        return CommandVisionResponse(
+            success=True,
+            session_id=session_id,
+            command=command,
+            reply=reply,
+            language=language,
+            objects=objects,
+            face_matches=face_matches,
+            ocr=ocr_results,
+            barcodes=barcodes,
+            processing=processing(
+                selected_frame=selected_idx,
+                quality_score=selected_quality.quality_score,
+                llm_attempted=True,
+                llm_used=True,
+            ),
+        )
+    finally:
+        for _, path in saved:
+            Path(path).unlink(missing_ok=True)
 
 # =========================================================
 # ANALYZE IMAGE

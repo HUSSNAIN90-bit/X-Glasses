@@ -132,6 +132,16 @@ class FrameQuality(BaseModel):
 
     brightness: float
 
+    width: int = 0
+
+    height: int = 0
+
+    exposure_score: float = 0.0
+
+    quality_score: float = 0.0
+
+    reason: str | None = None
+
 
 class FrameQualityBatchResponse(BaseModel):
     success: bool
@@ -246,3 +256,49 @@ class TrackingResponse(BaseModel):
     frames: list[
         TrackedFrameResponse
     ]
+
+
+class FaceMatch(BaseModel):
+    name: str | None = None
+    recognized: bool
+    confidence: float | None = None
+    detection_confidence: float
+
+
+class OCRResult(BaseModel):
+    text: str
+    confidence: float | None = None
+
+
+class CodeDetection(BaseModel):
+    format: str
+    value: str
+
+
+class VisionProcessing(BaseModel):
+    mode: str = "command_triggered"
+    request_id: str
+    frame_count: int
+    selected_frame: int | None = None
+    quality_score: float | None = None
+    quality_checked: bool = True
+    llm_attempted: bool = False
+    llm_used: bool = False
+    ai_called: bool = False
+    yolo_verified: bool = False
+    detectors: dict[str, str] = Field(default_factory=dict)
+    durations_ms: dict[str, float] = Field(default_factory=dict)
+    frame_quality: list[FrameQuality] = Field(default_factory=list)
+
+
+class CommandVisionResponse(BaseModel):
+    success: bool
+    session_id: str
+    command: str
+    reply: str
+    language: str = "en"
+    objects: list[Detection] = Field(default_factory=list)
+    face_matches: list[FaceMatch] = Field(default_factory=list)
+    ocr: list[OCRResult] = Field(default_factory=list)
+    barcodes: list[CodeDetection] = Field(default_factory=list)
+    processing: VisionProcessing

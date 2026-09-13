@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 Intent = Literal[
     "general",
     "vision",
+    "face_enrollment",
     "person_location",
     "object_search",
     "memory",
