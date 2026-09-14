@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 import time
 
 import cv2
@@ -24,8 +23,6 @@ from app.services.face_database import (
 from app.services.face_recognition import face_app, normalize_embedding
 
 
-# Enrollment is deliberately conservative: a few good, diverse embeddings are
-# more useful than a large collection of near-identical frames.
 TARGET_SAMPLES = 7
 MAX_SAMPLES = 10
 COOLDOWN_SECONDS = 0.75
@@ -36,9 +33,8 @@ MIN_BLUR_SCORE = 45.0
 MIN_BRIGHTNESS = 45.0
 MAX_BRIGHTNESS = 220.0
 
-# Approximate InsightFace pose ranges. pose is [yaw, pitch, roll] in degrees
-# on standard InsightFace models. Boundaries intentionally leave a little
-# overlap so real users are not forced into exact angles.
+# Approximate InsightFace pose ranges. The model exposes pose as three angles;
+# this module uses the first two as horizontal/vertical orientation signals.
 ANGLE_BUCKETS = {
     "front": ("yaw", -12.0, 12.0, "pitch", -12.0, 12.0),
     "slight_left": ("yaw", -35.0, -12.0, "pitch", -20.0, 20.0),
@@ -77,7 +73,6 @@ def _pose_values(face) -> tuple[float, float] | None:
     values = np.asarray(pose, dtype=np.float32).reshape(-1)
     if values.size < 2 or not np.isfinite(values[:2]).all():
         return None
-    # InsightFace uses [yaw, pitch, roll].
     return float(values[0]), float(values[1])
 
 
@@ -87,12 +82,11 @@ def classify_angle(face) -> str | None:
         return None
 
     yaw, pitch = pose
-    # Prioritize strong vertical pitch before horizontal buckets.
+
     if pitch <= -18.0 and abs(yaw) <= 35.0:
         return "up"
     if pitch >= 18.0 and abs(yaw) <= 35.0:
         return "down"
-
     if -12.0 <= yaw <= 12.0 and -12.0 <= pitch <= 12.0:
         return "front"
     if -35.0 <= yaw < -12.0 and -20.0 <= pitch <= 20.0:
@@ -108,16 +102,13 @@ def classify_angle(face) -> str | None:
 
 def _is_duplicate(embedding: np.ndarray, samples: list[CapturedSample]) -> bool:
     for sample in samples:
-        similarity = float(np.dot(embedding, sample.embedding))
-        if similarity >= DUPLICATE_SIMILARITY:
+        if float(np.dot(embedding, sample.embedding)) >= DUPLICATE_SIMILARITY:
             return True
     return False
 
 
 def _has_required_coverage(samples: list[CapturedSample]) -> bool:
     buckets = {sample.bucket for sample in samples}
-    # Front plus at least two different non-front directions is enough to
-    # finish naturally; the user does not need to perform every possible pose.
     horizontal = buckets.intersection(
         {"left", "right", "slight_left", "slight_right"}
     )
@@ -141,9 +132,9 @@ def capture_multi_angle_enrollment(
 ) -> dict:
     """Capture diverse face embeddings from the default camera.
 
-    The function is standalone and does not require the FastAPI server.
-    Press Q/Esc to cancel. It returns a summary dictionary and persists
-    accepted embeddings to the existing face database.
+    This is standalone and does not require the FastAPI server.
+    Press Q/Esc to cancel. Accepted embeddings are persisted to the existing
+    face database.
     """
     target_samples = max(3, min(int(target_samples), MAX_SAMPLES))
     max_samples = max(target_samples, min(int(max_samples), MAX_SAMPLES))
@@ -161,7 +152,6 @@ def capture_multi_angle_enrollment(
         raise RuntimeError("Could not open the camera.")
 
     samples: list[CapturedSample] = []
-    accepted = 0
     rejected = 0
     duplicates = 0
     last_capture = 0.0
@@ -171,6 +161,7 @@ def capture_multi_angle_enrollment(
         while camera.isOpened():
             ok, frame = camera.read()
             if not ok:
+                rejected += 1
                 break
 
             now = time.monotonic()
@@ -188,14 +179,19 @@ def capture_multi_angle_enrollment(
                 bucket = classify_angle(face)
 
                 if confidence < MIN_DETECTION_CONFIDENCE:
+                    rejected += 1
                     status = "Detection confidence too low"
                 elif min(width, height) < MIN_FACE_SIZE:
+                    rejected += 1
                     status = "Move closer"
                 elif blur < MIN_BLUR_SCORE:
+                    rejected += 1
                     status = "Hold still"
                 elif not MIN_BRIGHTNESS <= bright <= MAX_BRIGHTNESS:
+                    rejected += 1
                     status = "Adjust lighting"
                 elif bucket is None:
+                    rejected += 1
                     status = "Try another angle"
                 elif now - last_capture < COOLDOWN_SECONDS:
                     status = f"Good: {bucket}"
@@ -215,48 +211,30 @@ def capture_multi_angle_enrollment(
                         )
                         samples.append(sample)
                         add_embedding_to_person(person_id, embedding)
-                        accepted += 1
                         last_capture = now
                         status = f"Captured {bucket}"
 
-            # Visual feedback is intentionally simple and local-only.
             cv2.putText(
                 frame,
                 f"Enrollment: {name}  {len(samples)}/{target_samples}",
-                (20, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 255, 255),
-                2,
+                (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2,
             )
             cv2.putText(
                 frame,
                 status,
-                (20, 60),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.65,
-                (255, 255, 255),
-                2,
+                (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2,
             )
 
             captured_buckets = sorted({sample.bucket for sample in samples})
             cv2.putText(
                 frame,
                 "Angles: " + (", ".join(captured_buckets) or "none"),
-                (20, 90),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (255, 255, 255),
-                2,
+                (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
             )
             cv2.putText(
                 frame,
                 "Q / Esc: cancel",
-                (20, 120),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (255, 255, 255),
-                2,
+                (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
             )
 
             cv2.imshow("X-Glasses Multi-Angle Enrollment", frame)
