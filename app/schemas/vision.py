@@ -78,7 +78,7 @@ class PersonDetection(BaseModel):
     y1: float
     x2: float
     y2: float
-    
+
     person_bbox: list[float] | None = None
 
     relative_position: str | None = None
@@ -270,18 +270,34 @@ class OCRResult(BaseModel):
     confidence: float | None = None
 
 
+class CodePrice(BaseModel):
+    value: float
+    currency: str | None = None
+    source: str
+    kind: str
+
+
+class CodeProduct(BaseModel):
+    name: str | None = None
+    brand: str | None = None
+    category: str | None = None
+    source: str | None = None
+    prices: list[CodePrice] = Field(default_factory=list)
+    price_note: str | None = None
+
+
 class CodeDetection(BaseModel):
     format: str
     value: str
+    product: CodeProduct | None = None
 
 
 class VisionProcessing(BaseModel):
     mode: str = "command_triggered"
     request_id: str
-    frame_count: int
+    frame_count: int = 0
     selected_frame: int | None = None
     quality_score: float | None = None
-    quality_checked: bool = True
     llm_attempted: bool = False
     llm_used: bool = False
     ai_called: bool = False
