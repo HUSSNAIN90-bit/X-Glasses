@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from app.services.product_lookup import lookup_product
 
 
 # =========================================================
@@ -7,28 +9,17 @@ from pydantic import BaseModel, Field
 
 class Detection(BaseModel):
     class_name: str = Field(min_length=1)
-
-    confidence: float = Field(
-        ge=0.0,
-        le=1.0,
-    )
-
+    confidence: float = Field(ge=0.0, le=1.0)
     x1: float
     y1: float
     x2: float
     y2: float
-
     relative_position: str | None = None
     vertical_position: str | None = None
 
     @property
     def bbox(self) -> list[float]:
-        return [
-            self.x1,
-            self.y1,
-            self.x2,
-            self.y2,
-        ]
+        return [self.x1, self.y1, self.x2, self.y2]
 
 
 class VisionResponse(BaseModel):
@@ -48,10 +39,7 @@ class Relationship(BaseModel):
     subject: str
     relation: str
     object: str
-    confidence: float = Field(
-        ge=0.0,
-        le=1.0,
-    )
+    confidence: float = Field(ge=0.0, le=1.0)
 
 
 # =========================================================
@@ -60,43 +48,24 @@ class Relationship(BaseModel):
 
 class PersonDetection(BaseModel):
     face_id: str
-
     person_index: int | None
-
     name: str | None
-
     similarity: float | None
-
     recognized: bool
-
-    confidence: float = Field(
-        ge=0.0,
-        le=1.0,
-    )
-
+    confidence: float = Field(ge=0.0, le=1.0)
     x1: float
     y1: float
     x2: float
     y2: float
-
     person_bbox: list[float] | None = None
-
     relative_position: str | None = None
-
     vertical_position: str | None = None
-
     posture: str | None = None
-
     posture_confidence: float | None = None
 
     @property
     def bbox(self) -> list[float]:
-        return [
-            self.x1,
-            self.y1,
-            self.x2,
-            self.y2,
-        ]
+        return [self.x1, self.y1, self.x2, self.y2]
 
 
 # =========================================================
@@ -105,18 +74,11 @@ class PersonDetection(BaseModel):
 
 class CombinedVisionResponse(BaseModel):
     success: bool
-
     scene: str
-
     objects: list[Detection]
-
     people: list[PersonDetection]
-
     poses: list[PoseDetection]
-
-    relationships: list[Relationship] = Field(
-        default_factory=lambda: list[Relationship](),
-    )
+    relationships: list[Relationship] = Field(default_factory=list)
 
 
 # =========================================================
@@ -125,33 +87,21 @@ class CombinedVisionResponse(BaseModel):
 
 class FrameQuality(BaseModel):
     index: int
-
     good: bool
-
     blur_score: float
-
     brightness: float
-
     width: int = 0
-
     height: int = 0
-
     exposure_score: float = 0.0
-
     quality_score: float = 0.0
-
     reason: str | None = None
 
 
 class FrameQualityBatchResponse(BaseModel):
     success: bool
-
     accepted_frames: int
-
     total_frames: int
-
     frame_quality: list[FrameQuality]
-
     message: str
 
 
@@ -161,23 +111,16 @@ class FrameQualityBatchResponse(BaseModel):
 
 class FrameAnalysis(BaseModel):
     index: int
-
     blur_score: float
-
     brightness: float
-
     objects: list[Detection]
-
     people: list[PersonDetection]
 
 
 class MultiFrameAnalysisResponse(BaseModel):
     success: bool
-
     total_frames: int
-
     analyzed_frames: int
-
     frames: list[FrameAnalysis]
 
 
@@ -208,54 +151,29 @@ class TrackedDetectionResponse(BaseModel):
 
 class TrackedPersonResponse(BaseModel):
     track_id: int
-
     name: str | None
-
     recognized: bool
-
     recognition_similarity: float | None
-
     confidence: float
-
     x1: float
     y1: float
     x2: float
     y2: float
-    posture: str | None
-    posture_confidence: float | None
-    keypoints: list[list[float]] | None
-
     posture: str | None = None
-
     posture_confidence: float | None = None
-
     keypoints: list[list[float]] | None = None
 
 
 class TrackedFrameResponse(BaseModel):
     index: int
-
-    detections: list[
-        TrackedDetectionResponse
-    ]
-
-    people: list[
-        TrackedPersonResponse
-    ]
-
-    relationships: list[
-        Relationship
-    ] = Field(
-        default_factory=lambda: list[Relationship](),
-    )
+    detections: list[TrackedDetectionResponse]
+    people: list[TrackedPersonResponse]
+    relationships: list[Relationship] = Field(default_factory=list)
 
 
 class TrackingResponse(BaseModel):
     success: bool
-
-    frames: list[
-        TrackedFrameResponse
-    ]
+    frames: list[TrackedFrameResponse]
 
 
 class FaceMatch(BaseModel):
@@ -290,6 +208,53 @@ class CodeDetection(BaseModel):
     format: str
     value: str
     product: CodeProduct | None = None
+
+    @model_validator(mode="after")
+    def enrich_product_barcode(self):
+        if self.product is not None:
+            return self
+        if self.format.upper() in {"QR_CODE", "QR", "QRCODE"}:
+            return self
+
+        normalized = "".join(ch for ch in self.value if ch.isdigit())
+        if len(normalized) not in {8, 10, 12, 13, 14}:
+            return self
+
+        try:
+            result = lookup_product(normalized)
+        except Exception:
+            return self
+
+        if not result.success:
+            return self
+
+        prices = [
+            CodePrice(
+                value=price.value,
+                currency=price.currency,
+                source=price.source,
+                kind=price.kind,
+            )
+            for price in (result.prices or [])
+        ]
+
+        note = None
+        lowest = [p.value for p in prices if p.kind == "lowest_recorded_offer"]
+        highest = [p.value for p in prices if p.kind == "highest_recorded_offer"]
+        if lowest and highest:
+            currency = next((p.currency for p in prices if p.currency), None)
+            suffix = f" {currency}" if currency else ""
+            note = f"Recorded offers range from {lowest[0]:.2f}{suffix} to {highest[0]:.2f}{suffix}."
+
+        self.product = CodeProduct(
+            name=result.name,
+            brand=result.brand,
+            category=result.category,
+            source=result.source,
+            prices=prices,
+            price_note=note,
+        )
+        return self
 
 
 class VisionProcessing(BaseModel):
