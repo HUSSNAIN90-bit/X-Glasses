@@ -48,10 +48,11 @@ starlette==1.6.0
 sympy==1.14.0
 torch==2.14.0
 torchvision==0.29.0
+zxing-cpp==2.3.0
 typing-inspection==0.4.4
 typing_extensions==4.16.0
+urllib3==2.7.0
+uvicorn==0.52.4
 ultralytics==8.4.142
 ultralytics-platform==0.1.21
 ultralytics-thop==2.1.6
-urllib3==2.7.0
-uvicorn==0.52.4
