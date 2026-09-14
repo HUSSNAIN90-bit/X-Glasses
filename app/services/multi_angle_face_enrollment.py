@@ -1,8 +1,8 @@
-"""Automatic multi-angle face enrollment for X-Glasses.
+"""Automatic passive multi-angle face enrollment for X-Glasses.
 
 This module is intentionally separate from the normal one-frame enrollment flow.
-It can capture a small set of diverse, quality-gated face embeddings from a
-camera without starting the FastAPI server.
+It captures a small set of diverse, quality-gated face embeddings from a camera
+without asking the person to follow voice/visual angle instructions.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from app.services.face_recognition import face_app, normalize_embedding
 
 TARGET_SAMPLES = 7
 MAX_SAMPLES = 10
+MAX_DURATION_SECONDS = 30.0
 COOLDOWN_SECONDS = 0.75
 DUPLICATE_SIMILARITY = 0.985
 MIN_DETECTION_CONFIDENCE = 0.55
@@ -32,6 +33,10 @@ MIN_FACE_SIZE = 90
 MIN_BLUR_SCORE = 45.0
 MIN_BRIGHTNESS = 45.0
 MAX_BRIGHTNESS = 220.0
+
+# Keep the gallery diverse instead of filling it with repeated frames from one
+# easy angle. Two samples per bucket is enough to retain a little redundancy.
+MAX_SAMPLES_PER_BUCKET = 2
 
 # Approximate InsightFace pose ranges. The model exposes pose as three angles;
 # this module uses the first two as horizontal/vertical orientation signals.
@@ -107,6 +112,10 @@ def _is_duplicate(embedding: np.ndarray, samples: list[CapturedSample]) -> bool:
     return False
 
 
+def _bucket_count(samples: list[CapturedSample], bucket: str) -> int:
+    return sum(sample.bucket == bucket for sample in samples)
+
+
 def _has_required_coverage(samples: list[CapturedSample]) -> bool:
     buckets = {sample.bucket for sample in samples}
     horizontal = buckets.intersection(
@@ -129,15 +138,21 @@ def capture_multi_angle_enrollment(
     camera_index: int = 0,
     target_samples: int = TARGET_SAMPLES,
     max_samples: int = MAX_SAMPLES,
+    max_duration_seconds: float = MAX_DURATION_SECONDS,
 ) -> dict:
-    """Capture diverse face embeddings from the default camera.
+    """Passively capture diverse face embeddings from the default camera.
 
-    This is standalone and does not require the FastAPI server.
-    Press Q/Esc to cancel. Accepted embeddings are persisted to the existing
-    face database.
+    The person is never instructed to look in a particular direction. Frames
+    are accepted opportunistically when a naturally observed angle is useful,
+    high quality, and not already over-represented. The session ends when the
+    target count plus required angle diversity is reached, or when the timeout
+    is reached. Press Q/Esc to cancel.
+
+    Accepted embeddings are persisted to the existing face database.
     """
     target_samples = max(3, min(int(target_samples), MAX_SAMPLES))
     max_samples = max(target_samples, min(int(max_samples), MAX_SAMPLES))
+    max_duration_seconds = max(5.0, float(max_duration_seconds))
 
     existing = get_person_by_name(name)
     if existing is None:
@@ -156,17 +171,24 @@ def capture_multi_angle_enrollment(
     duplicates = 0
     last_capture = 0.0
     started = time.monotonic()
+    stop_reason = "cancelled"
 
     try:
         while camera.isOpened():
+            elapsed = time.monotonic() - started
+            if elapsed >= max_duration_seconds:
+                stop_reason = "timeout"
+                break
+
             ok, frame = camera.read()
             if not ok:
                 rejected += 1
+                stop_reason = "camera_read_failed"
                 break
 
             now = time.monotonic()
             face = _get_single_face(frame)
-            status = "Show one face"
+            status = "Observing naturally..."
             bucket = None
 
             if face is not None:
@@ -192,7 +214,11 @@ def capture_multi_angle_enrollment(
                     status = "Adjust lighting"
                 elif bucket is None:
                     rejected += 1
-                    status = "Try another angle"
+                    status = "Observing angle..."
+                elif _bucket_count(samples, bucket) >= MAX_SAMPLES_PER_BUCKET:
+                    # Do not waste the gallery on repeated frames from one
+                    # already-covered angle. Keep observing for new angles.
+                    status = f"{bucket} covered"
                 elif now - last_capture < COOLDOWN_SECONDS:
                     status = f"Good: {bucket}"
                 else:
@@ -240,11 +266,17 @@ def capture_multi_angle_enrollment(
             cv2.imshow("X-Glasses Multi-Angle Enrollment", frame)
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
+                stop_reason = "cancelled"
                 break
 
             if len(samples) >= target_samples and _has_required_coverage(samples):
+                stop_reason = "coverage_complete"
                 break
+
+            # The max sample count is only a safety cap. It no longer causes
+            # early completion before the required angle coverage is present.
             if len(samples) >= max_samples:
+                stop_reason = "max_samples"
                 break
     finally:
         camera.release()
@@ -255,6 +287,7 @@ def capture_multi_angle_enrollment(
         bucket: sum(sample.bucket == bucket for sample in samples)
         for bucket in ANGLE_BUCKETS
     }
+    coverage_complete = _has_required_coverage(samples)
 
     return {
         "success": bool(samples),
@@ -267,9 +300,9 @@ def capture_multi_angle_enrollment(
         "duration_seconds": round(duration, 2),
         "angle_buckets": bucket_counts,
         "angles_captured": sorted({sample.bucket for sample in samples}),
-        "completed_automatically": (
-            len(samples) >= target_samples and _has_required_coverage(samples)
-        ),
+        "coverage_complete": coverage_complete,
+        "completed_automatically": coverage_complete and len(samples) >= target_samples,
+        "stop_reason": stop_reason,
     }
 
 
