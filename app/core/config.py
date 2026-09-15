@@ -6,9 +6,8 @@ class Settings(BaseSettings):
     app_name: str = "AI Glasses Backend"
     environment: str = "development"
 
-    # Legacy Groq settings are retained for the existing non-vision chat flows.
     llm_api_key: str = ""
-    vision_model: str = "qwen/qwen3.6-27b"
+    groq_chat_model: str = "llama-3.1-8b-instant"
 
     openai_api_key: str = ""
     openai_vision_model: str = "gpt-6-astra"
@@ -30,8 +29,12 @@ class Settings(BaseSettings):
     @field_validator("openai_vision_model", mode="before")
     @classmethod
     def normalize_openai_vision_model(cls, value: object) -> str:
-        """OpenAI model IDs are lowercase; tolerate common .env capitalization."""
         return str(value).strip().lower()
+
+    @field_validator("groq_chat_model", mode="before")
+    @classmethod
+    def normalize_groq_chat_model(cls, value: object) -> str:
+        return str(value).strip()
 
 
 settings = Settings()
