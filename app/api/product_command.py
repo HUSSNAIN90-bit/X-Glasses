@@ -14,6 +14,7 @@ from app.services.frame_quality import evaluate_frame_quality, optimize_image_fo
 from app.services.llm import describe_image_command
 
 router = APIRouter(prefix="/api/product", tags=["Product"])
+RETRY_SESSIONS: set[str] = set()
 
 IMAGE_SUFFIXES = {
     "image/bmp": ".bmp",
@@ -41,9 +42,7 @@ def _reply_for_product_codes(codes) -> str | None:
     qr_codes = [c for c in codes if c.format.upper() in {"QR_CODE", "QR", "QRCODE"}]
     if qr_codes:
         value = qr_codes[0].value
-        if value.startswith(("http://", "https://")):
-            return "I found a QR code with a web link."
-        return "I found a QR code."
+        return "I found a QR code with a web link." if value.startswith(("http://", "https://")) else "I found a QR code."
     return None
 
 
@@ -63,6 +62,12 @@ async def product_command(
         raise HTTPException(status_code=400, detail="session_id and command are required.")
     if not frames or len(frames) > 6:
         raise HTTPException(status_code=400, detail="Send between 1 and 6 frames.")
+
+    # If the previous request asked the user to move closer, the next request
+    # from the same glasses session goes directly to vision fallback if the
+    # barcode still cannot be decoded.
+    barcode_retry = barcode_retry or session_id in RETRY_SESSIONS
+    RETRY_SESSIONS.discard(session_id)
 
     saved: list[tuple[int, str]] = []
     quality: list[FrameQuality] = []
@@ -86,31 +91,13 @@ async def product_command(
             ]
         )
         for (index, _), item in zip(saved, metrics):
-            quality.append(
-                FrameQuality(
-                    index=index,
-                    good=item.good,
-                    blur_score=item.blur_score,
-                    brightness=item.brightness,
-                    width=item.width,
-                    height=item.height,
-                    exposure_score=item.exposure_score,
-                    quality_score=item.quality_score,
-                    reason=item.reason,
-                )
-            )
+            quality.append(FrameQuality(index=index, good=item.good, blur_score=item.blur_score, brightness=item.brightness, width=item.width, height=item.height, exposure_score=item.exposure_score, quality_score=item.quality_score, reason=item.reason))
 
-        candidates = [
-            (idx, path, q)
-            for (idx, path), q in zip(saved, quality)
-            if q.good
-        ] or [(idx, path, q) for (idx, path), q in zip(saved, quality)]
-        selected_idx, selected_path, selected_quality = max(
-            candidates, key=lambda item: item[2].quality_score
-        )
-
+        candidates = [(idx, path, q) for (idx, path), q in zip(saved, quality) if q.good] or [(idx, path, q) for (idx, path), q in zip(saved, quality)]
+        selected_idx, selected_path, selected_quality = max(candidates, key=lambda item: item[2].quality_score)
         code_paths = [path for _, path, q in candidates if q.good] or [p for _, p in saved]
         codes = await asyncio.to_thread(detect_codes_from_frames, code_paths)
+
         processing = VisionProcessing(
             mode="barcode_scan",
             request_id=str(uuid.uuid4()),
@@ -125,57 +112,24 @@ async def product_command(
 
         direct_reply = _reply_for_product_codes(codes)
         if direct_reply:
-            return CommandVisionResponse(
-                success=True,
-                session_id=session_id,
-                command=command,
-                reply=direct_reply,
-                language=language,
-                barcodes=[CodeDetection(format=c.format, value=c.value, product=None) for c in codes],
-                processing=processing,
-            )
+            return CommandVisionResponse(success=True, session_id=session_id, command=command, reply=direct_reply, language=language, barcodes=[CodeDetection(format=c.format, value=c.value, product=None) for c in codes], processing=processing)
 
-        # Give the user one chance to move a genuinely tiny/unreadable barcode closer.
         if not barcode_retry:
+            RETRY_SESSIONS.add(session_id)
             processing.mode = "barcode_retry"
             processing.detectors["barcode_qr"] = "retry_requested"
-            return CommandVisionResponse(
-                success=True,
-                session_id=session_id,
-                command=command,
-                reply="I can't read the barcode clearly. Please bring the product a little closer.",
-                language=language,
-                barcodes=[],
-                processing=processing,
-            )
+            return CommandVisionResponse(success=True, session_id=session_id, command=command, reply="I can't read the barcode clearly. Please bring the product a little closer.", language=language, barcodes=[], processing=processing)
 
-        optimized = await asyncio.to_thread(
-            optimize_image_for_vision,
-            selected_path,
-            settings.vision_max_dimension,
-            settings.vision_jpeg_quality,
-        )
+        optimized = await asyncio.to_thread(optimize_image_for_vision, selected_path, settings.vision_max_dimension, settings.vision_jpeg_quality)
         llm_started = time.perf_counter()
-        reply = await describe_image_command(
-            image_bytes=optimized,
-            command=command,
-            detected_codes=[],
-        )
+        reply = await describe_image_command(image_bytes=optimized, command=command, detected_codes=[])
         processing.mode = "barcode_llm_fallback"
         processing.llm_attempted = True
         processing.llm_used = True
         processing.ai_called = True
         processing.durations_ms["llm"] = round((time.perf_counter() - llm_started) * 1000, 1)
         processing.durations_ms["total"] = round((time.perf_counter() - started) * 1000, 1)
-        return CommandVisionResponse(
-            success=True,
-            session_id=session_id,
-            command=command,
-            reply=reply,
-            language=language,
-            barcodes=[],
-            processing=processing,
-        )
+        return CommandVisionResponse(success=True, session_id=session_id, command=command, reply=reply, language=language, barcodes=[], processing=processing)
     finally:
         for _, path in saved:
             try:
