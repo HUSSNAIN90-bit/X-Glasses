@@ -6,6 +6,7 @@ from app.api.vision import command_router, router as vision_router
 from app.api.faces import router as faces_router
 from app.api.enrollment import router as enrollment_router
 from app.api.session import router as session_router
+from app.api.product_command import router as product_router
 
 from app.services.face_database import (
     initialize_database,
@@ -24,6 +25,7 @@ app.include_router(command_router)
 app.include_router(faces_router)
 app.include_router(enrollment_router)
 app.include_router(session_router)
+app.include_router(product_router)
 
 @app.get("/")
 async def root():
