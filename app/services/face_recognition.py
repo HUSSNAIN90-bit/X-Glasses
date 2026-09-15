@@ -17,8 +17,6 @@ MODEL_NAME = "buffalo_l"
 # increasing false-positive matches.
 FACE_MATCH_THRESHOLD = 0.45
 
-# Only run the extra illumination variants when the frame is likely to have
-# difficult lighting. This keeps normal frames fast enough for live use.
 LOW_LIGHT_BRIGHTNESS = 95.0
 HIGH_LIGHT_BRIGHTNESS = 185.0
 CLAHE_CLIP_LIMIT = 2.0
@@ -66,7 +64,6 @@ def normalize_embedding(
 
 
 def _gamma_correct(image: np.ndarray, gamma: float) -> np.ndarray:
-    """Apply gamma correction without changing the camera image dimensions."""
     gamma = max(0.1, float(gamma))
     table = np.array(
         [((i / 255.0) ** gamma) * 255.0 for i in np.arange(256)],
@@ -76,7 +73,6 @@ def _gamma_correct(image: np.ndarray, gamma: float) -> np.ndarray:
 
 
 def _clahe_image(image: np.ndarray) -> np.ndarray:
-    """Improve local contrast while preserving the original colour balance."""
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
     l_channel, a_channel, b_channel = cv2.split(lab)
 
@@ -93,21 +89,17 @@ def _clahe_image(image: np.ndarray) -> np.ndarray:
 
 
 def _lighting_variants(image: np.ndarray) -> list[np.ndarray]:
-    """Return the original image plus only the useful lighting fallbacks."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     brightness = float(gray.mean())
 
-    # Normal lighting: don't spend extra inference time on preprocessing.
     if LOW_LIGHT_BRIGHTNESS <= brightness <= HIGH_LIGHT_BRIGHTNESS:
         return [image]
 
     clahe = _clahe_image(image)
 
     if brightness < LOW_LIGHT_BRIGHTNESS:
-        # Gamma < 1 lifts shadow detail.
         gamma = _gamma_correct(image, 0.65)
     else:
-        # Gamma > 1 reduces harsh highlights from strong outdoor light.
         gamma = _gamma_correct(image, 1.35)
 
     return [image, clahe, gamma]
@@ -173,6 +165,46 @@ def _recognize_candidate(
     return best_name, best_similarity
 
 
+def extract_single_face_embedding(
+    image_path: str,
+) -> np.ndarray | None:
+    """Return one normalized embedding only when a frame contains one face.
+
+    The original frame is preferred. Enhanced lighting variants are fallback
+    attempts only when the original frame does not yield exactly one face.
+    A multi-face original is rejected rather than silently selecting one face.
+    """
+    image_file = Path(image_path)
+
+    if not image_file.exists():
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
+    image = cv2.imread(str(image_file))
+    if image is None:
+        raise ValueError(f"Unable to read image: {image_path}")
+
+    variants = _lighting_variants(image)
+    original_faces = face_app.get(variants[0])
+
+    if len(original_faces) > 1:
+        return None
+
+    if len(original_faces) == 1:
+        embedding = normalize_embedding(original_faces[0].embedding)
+        return embedding if embedding.size else None
+
+    for variant in variants[1:]:
+        faces = face_app.get(variant)
+        if len(faces) == 1:
+            embedding = normalize_embedding(faces[0].embedding)
+            return embedding if embedding.size else None
+
+        if len(faces) > 1:
+            return None
+
+    return None
+
+
 def extract_face_embeddings(
     image_path: str,
 ) -> list[np.ndarray]:
@@ -190,8 +222,6 @@ def extract_face_embeddings(
             f"Unable to read image: {image_path}"
         )
 
-    # Enrollment also benefits from the same lighting normalization. We still
-    # prefer the original frame and use enhanced variants only when needed.
     embeddings: list[np.ndarray] = []
 
     for variant in _lighting_variants(image):
@@ -200,8 +230,6 @@ def extract_face_embeddings(
         if not faces:
             continue
 
-        # Enrollment requires exactly one face. Use the strongest detection
-        # from the best available lighting variant and stop here.
         face = max(
             faces,
             key=lambda item: float(item.det_score),
@@ -211,7 +239,6 @@ def extract_face_embeddings(
         if embedding.size:
             embeddings.append(embedding)
 
-        # Avoid returning duplicate embeddings from several lighting variants.
         break
 
     return embeddings
@@ -237,8 +264,6 @@ def recognize_faces(
     people = get_all_people_with_embeddings()
     candidates: list[dict] = []
 
-    # Original frame is always tried first. On difficult lighting, CLAHE and
-    # gamma-corrected versions give the detector/ArcFace a second chance.
     for variant in _lighting_variants(image):
         faces = face_app.get(variant)
 
@@ -246,8 +271,6 @@ def recognize_faces(
             bbox = np.asarray(face.bbox, dtype=np.float32)
             name, similarity = _recognize_candidate(face, people)
 
-            # Prefer identity similarity when available, while retaining the
-            # detector confidence as a tie-breaker for unknown faces.
             rank = (
                 float(similarity) if similarity is not None else -1.0,
                 float(face.det_score),
@@ -263,9 +286,6 @@ def recognize_faces(
                 }
             )
 
-    # The same physical face can be detected in the original + enhanced
-    # variants. Merge those overlapping detections so the API never reports
-    # duplicates just because lighting correction found the face too.
     selected: list[dict] = []
     for candidate in candidates:
         duplicate_index = None
