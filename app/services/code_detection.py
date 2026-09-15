@@ -23,8 +23,6 @@ class DetectedCode:
 
 
 def _product_for_barcode(value: str) -> DetectedProduct | None:
-    # QR payloads can be arbitrary text/URLs; only numeric product codes are
-    # sent to product databases to avoid unnecessary external requests.
     normalized = "".join(ch for ch in value if ch.isdigit())
     if len(normalized) not in {8, 10, 12, 13, 14}:
         return None
@@ -34,23 +32,16 @@ def _product_for_barcode(value: str) -> DetectedProduct | None:
         return None
 
     prices = [
-        {
-            "value": price.value,
-            "currency": price.currency,
-            "source": price.source,
-            "kind": price.kind,
-        }
-        for price in (product.prices or [])
+        {"value": p.value, "currency": p.currency, "source": p.source, "kind": p.kind}
+        for p in (product.prices or [])
     ]
-
     price_note = None
-    if prices:
-        lowest = [item["value"] for item in prices if item["kind"] == "lowest_recorded_offer"]
-        highest = [item["value"] for item in prices if item["kind"] == "highest_recorded_offer"]
-        if lowest and highest:
-            currency = next((item["currency"] for item in prices if item["currency"]), None)
-            symbol = f" {currency}" if currency else ""
-            price_note = f"Recorded offers range from {lowest[0]:.2f}{symbol} to {highest[0]:.2f}{symbol}."
+    lowest = [p["value"] for p in prices if p["kind"] == "lowest_recorded_offer"]
+    highest = [p["value"] for p in prices if p["kind"] == "highest_recorded_offer"]
+    if lowest and highest:
+        currency = next((p["currency"] for p in prices if p["currency"]), None)
+        suffix = f" {currency}" if currency else ""
+        price_note = f"Recorded offers range from {lowest[0]:.2f}{suffix} to {highest[0]:.2f}{suffix}."
 
     return DetectedProduct(
         name=product.name,
@@ -62,39 +53,98 @@ def _product_for_barcode(value: str) -> DetectedProduct | None:
     )
 
 
+def _variants(image):
+    """Create local barcode/QR-friendly variants for small or difficult codes."""
+    variants = [image]
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    variants.append(gray)
+
+    height, width = gray.shape[:2]
+    scale = min(2.5, 1600 / max(width, 1)) if width < 1600 else 1.5
+    variants.append(cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC))
+
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    variants.append(enhanced)
+    variants.append(cv2.convertScaleAbs(enhanced, alpha=1.35, beta=0))
+    variants.append(
+        cv2.adaptiveThreshold(
+            enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 8
+        )
+    )
+    return variants
+
+
+def _decode_variant(image, seen_values: set[str]) -> list[DetectedCode]:
+    found_codes: list[DetectedCode] = []
+
+    try:
+        detector = cv2.barcode_BarcodeDetector()
+        found, values, code_types, _ = detector.detectAndDecodeWithType(image)
+        if found:
+            for value, code_type in zip(values, code_types):
+                value = (value or "").strip()
+                if value and value not in seen_values:
+                    found_codes.append(
+                        DetectedCode(
+                            format=code_type or "BARCODE",
+                            value=value,
+                            product=_product_for_barcode(value),
+                        )
+                    )
+                    seen_values.add(value)
+    except Exception:
+        pass
+
+    try:
+        qr = cv2.QRCodeDetector()
+        found, values, _, _ = qr.detectAndDecodeMulti(image)
+        if found and values is not None:
+            for value in values:
+                value = (value or "").strip()
+                if value and value not in seen_values:
+                    found_codes.append(DetectedCode(format="QR_CODE", value=value))
+                    seen_values.add(value)
+        else:
+            value, _, _ = qr.detectAndDecode(image)
+            value = (value or "").strip()
+            if value and value not in seen_values:
+                found_codes.append(DetectedCode(format="QR_CODE", value=value))
+                seen_values.add(value)
+    except Exception:
+        pass
+
+    return found_codes
+
+
 def detect_codes(image_path: str) -> list[DetectedCode]:
-    """Decode QR/linear codes and enrich product barcodes when possible."""
     image = cv2.imread(image_path)
     if image is None or image.size == 0:
         raise ValueError("Unable to read image for code detection.")
 
     detected: list[DetectedCode] = []
     seen_values: set[str] = set()
+    for variant in _variants(image):
+        detected.extend(_decode_variant(variant, seen_values))
+        if detected:
+            break
+    return detected
 
-    barcode_detector = cv2.barcode_BarcodeDetector()
-    found, values, code_types, _ = barcode_detector.detectAndDecodeWithType(image)
-    if found:
-        for value, code_type in zip(values, code_types):
-            value = value.strip()
-            if value and value not in seen_values:
-                detected.append(
-                    DetectedCode(
-                        format=code_type or "BARCODE",
-                        value=value,
-                        product=_product_for_barcode(value),
-                    )
-                )
-                seen_values.add(value)
 
-    qr_detector = cv2.QRCodeDetector()
-    found, values, _, _ = qr_detector.detectAndDecodeMulti(image)
-    if found:
-        for value in values:
-            value = value.strip()
-            if value and value not in seen_values:
-                detected.append(
-                    DetectedCode(format="QR_CODE", value=value)
-                )
-                seen_values.add(value)
-
+def detect_codes_from_frames(image_paths: list[str]) -> list[DetectedCode]:
+    """Search the whole short camera burst and merge decoded values."""
+    detected: list[DetectedCode] = []
+    seen_values: set[str] = set()
+    for path in image_paths:
+        try:
+            image = cv2.imread(path)
+            if image is None or image.size == 0:
+                continue
+            for variant in _variants(image):
+                new_codes = _decode_variant(variant, seen_values)
+                detected.extend(new_codes)
+                if new_codes:
+                    break
+        except Exception:
+            continue
     return detected
