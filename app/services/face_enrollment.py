@@ -1,13 +1,15 @@
 from dataclasses import dataclass
 import re
 
+import numpy as np
+
 from app.services.face_database import (
     add_embedding_to_person,
     create_person,
     get_person_by_name,
     update_person_relationship,
 )
-from app.services.face_recognition import extract_face_embeddings
+from app.services.face_recognition import extract_single_face_embedding
 
 
 RELATIONSHIP_ALIASES = {
@@ -26,6 +28,11 @@ RELATIONSHIP_ALIASES = {
 RELATIONSHIP_PATTERN = "|".join(RELATIONSHIP_ALIASES)
 NAME_PATTERN = r"[A-Za-z][A-Za-z' -]{0,48}"
 
+# Keep enrollment conservative: store genuinely different views rather than
+# filling the gallery with near-identical camera frames.
+ENROLLMENT_TARGET_FRAMES = 5
+ENROLLMENT_DUPLICATE_SIMILARITY = 0.97
+
 
 @dataclass(frozen=True)
 class FaceIntroduction:
@@ -38,6 +45,8 @@ class FaceEnrollmentResult:
     success: bool
     reply: str
     person_id: str | None = None
+    accepted_frames: int = 0
+    attempted_frames: int = 0
 
 
 def _normalize_name(value: str) -> str | None:
@@ -106,32 +115,74 @@ def parse_face_introduction(message: str) -> FaceIntroduction | None:
     return None
 
 
+def _is_duplicate(
+    embedding: np.ndarray,
+    selected_embeddings: list[np.ndarray],
+) -> bool:
+    for existing in selected_embeddings:
+        similarity = float(np.dot(embedding, existing))
+        if similarity >= ENROLLMENT_DUPLICATE_SIMILARITY:
+            return True
+    return False
+
+
 def enroll_introduced_person(
-    image_path: str,
+    image_paths: str | list[str],
     introduction: FaceIntroduction,
 ) -> FaceEnrollmentResult:
-    try:
-        embeddings = extract_face_embeddings(image_path)
-    except (FileNotFoundError, ValueError):
+    """Enroll several good camera frames from one spoken introduction.
+
+    The caller is responsible for selecting good-quality frames. This service
+    performs the biometric-specific gates: exactly one face and embedding
+    diversity. Existing single-frame callers remain supported.
+    """
+    if isinstance(image_paths, str):
+        paths = [image_paths]
+    else:
+        paths = list(image_paths)
+
+    if not paths:
         return FaceEnrollmentResult(
             success=False,
-            reply="I couldn't read the current camera frame.",
-        )
-    except Exception:
-        return FaceEnrollmentResult(
-            success=False,
-            reply="I couldn't detect the face right now. Please try again.",
+            reply="I couldn't read any camera frames.",
         )
 
-    if not embeddings:
+    selected_embeddings: list[np.ndarray] = []
+
+    for path in paths:
+        try:
+            embedding = extract_single_face_embedding(path)
+        except (FileNotFoundError, ValueError):
+            continue
+        except Exception:
+            continue
+
+        if embedding is None:
+            continue
+
+        if _is_duplicate(embedding, selected_embeddings):
+            continue
+
+        selected_embeddings.append(embedding)
+        if len(selected_embeddings) >= ENROLLMENT_TARGET_FRAMES:
+            break
+
+    if not selected_embeddings:
         return FaceEnrollmentResult(
             success=False,
-            reply="I can't save them because I don't see a clear face.",
+            reply="I can't save them because I don't see one clear face in the captured frames.",
+            attempted_frames=len(paths),
         )
-    if len(embeddings) != 1:
+
+    if len(selected_embeddings) < ENROLLMENT_TARGET_FRAMES:
         return FaceEnrollmentResult(
             success=False,
-            reply="Please show only one face while introducing someone.",
+            reply=(
+                f"I only got {len(selected_embeddings)} useful face views. "
+                "Please keep the person in view and try the introduction again."
+            ),
+            accepted_frames=len(selected_embeddings),
+            attempted_frames=len(paths),
         )
 
     try:
@@ -146,14 +197,17 @@ def enroll_introduced_person(
             if introduction.relationship:
                 update_person_relationship(person_id, introduction.relationship)
 
-        add_embedding_to_person(
-            person_id=person_id,
-            embedding=embeddings[0],
-        )
+        for embedding in selected_embeddings:
+            add_embedding_to_person(
+                person_id=person_id,
+                embedding=embedding,
+            )
     except Exception:
         return FaceEnrollmentResult(
             success=False,
             reply="I couldn't save that person right now. Please try again.",
+            accepted_frames=len(selected_embeddings),
+            attempted_frames=len(paths),
         )
 
     relationship_phrase = (
@@ -164,5 +218,10 @@ def enroll_introduced_person(
     return FaceEnrollmentResult(
         success=True,
         person_id=person_id,
-        reply=f"I've saved {introduction.name}{relationship_phrase}.",
+        accepted_frames=len(selected_embeddings),
+        attempted_frames=len(paths),
+        reply=(
+            f"I've saved {introduction.name}{relationship_phrase} "
+            f"using {len(selected_embeddings)} different face views."
+        ),
     )
