@@ -9,10 +9,8 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     groq_chat_model: str = "llama-3.1-8b-instant"
 
-    openai_api_key: str = ""
-    openai_vision_model: str = "gpt-6-astra"
-    openai_timeout_seconds: float = 30.0
-    openai_vision_service_tier: str = ""
+    gemini_api_key: str = ""
+    gemini_vision_model: str = "gemini-2.5-flash"
 
     max_vision_frame_bytes: int = 8 * 1024 * 1024
     max_vision_frame_pixels: int = 24_000_000
@@ -25,11 +23,6 @@ class Settings(BaseSettings):
         env_file=".env",
         extra="ignore",
     )
-
-    @field_validator("openai_vision_model", mode="before")
-    @classmethod
-    def normalize_openai_vision_model(cls, value: object) -> str:
-        return str(value).strip().lower()
 
     @field_validator("groq_chat_model", mode="before")
     @classmethod
