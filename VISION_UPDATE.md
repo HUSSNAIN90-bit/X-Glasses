@@ -50,3 +50,6 @@ and one to three repeated `frames` files. The legacy route also accepts repeated
 The backend now exposes the generated mobile model at `GET /api/models/yolo26n.tflite` and its label/input manifest at `GET /api/models/yolo26n/manifest`. Generate the artifact with `python scripts/export_yolo26_litert.py`. The feature branch also contains a GitHub Actions workflow that exports and smoke-tests the model on Ubuntu, then commits the `.tflite` and manifest back to this branch. The source weights remain `models/yolo26n.pt`; the runtime artifact is generated and should not be manually edited.
 
 The mobile app downloads and caches the LiteRT model on first use, attempts the Android GPU delegate, and falls back to the CPU delegate. Object/position questions use local inference first; if the model is unavailable or inference fails, the existing FastAPI/GPT vision route remains the fallback. The initial model download requires a backend connection; subsequent inference uses the cached local file.
+
+
+Mobile post-processing reads tensor layout and output shape from the exported model at runtime. It supports NCHW/NHWC input tensors and both YOLO26 end-to-end `[1,300,6]` and raw one-to-many output layouts, applying class-wise NMS only to raw outputs.
