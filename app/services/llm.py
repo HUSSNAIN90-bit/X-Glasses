@@ -6,15 +6,8 @@ from typing import cast
 
 from groq import AsyncGroq
 from groq.types.chat import ChatCompletionMessageParam
-from openai import (
-    APIConnectionError,
-    APIStatusError,
-    APITimeoutError,
-    AsyncOpenAI,
-    AuthenticationError,
-    BadRequestError,
-    RateLimitError,
-)
+from google import genai
+from google.genai import types
 
 from app.core.config import settings
 from app.schemas.chat import IntentResult
@@ -73,17 +66,13 @@ determined from the image or verified metadata, say so briefly."""
 
 
 @lru_cache(maxsize=1)
-def get_openai_vision_client() -> AsyncOpenAI:
-    api_key = settings.openai_api_key.strip()
+def get_gemini_vision_client() -> genai.Client:
+    api_key = settings.gemini_api_key.strip()
     if not api_key:
         raise VisionLLMConfigurationError(
-            "OPENAI_API_KEY is missing from the backend environment."
+            "GEMINI_API_KEY is missing from the backend environment."
         )
-    return AsyncOpenAI(
-        api_key=api_key,
-        timeout=settings.openai_timeout_seconds,
-        max_retries=0,
-    )
+    return genai.Client(api_key=api_key)
 
 
 def clean_llm_response(text: str) -> str:
@@ -139,53 +128,45 @@ async def describe_image_command(
         "Verified local detector metadata (supporting context only):\n"
         f"{json.dumps(metadata, ensure_ascii=True, separators=(',', ':'))}"
     )
-    image_b64 = base64.b64encode(image_bytes).decode("ascii")
-
-    request_options = {
-        "model": settings.openai_vision_model,
-        "instructions": VISION_ASSISTANT_INSTRUCTIONS,
-        "input": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": prompt},
-                    {
-                        "type": "input_image",
-                        "image_url": f"data:image/jpeg;base64,{image_b64}",
-                        "detail": "auto",
-                    },
-                ],
-            }
-        ],
-        "reasoning": {"effort": "low"},
-        "max_output_tokens": 110,
-        "store": False,
-    }
-    if settings.openai_vision_service_tier.strip():
-        request_options["service_tier"] = settings.openai_vision_service_tier.strip()
-
+    request_prompt = (
+        f"{prompt}\n\n"
+        "Analyze the attached camera frame. The image is the primary source of truth. "
+        "Use the verified metadata only as supporting context."
+    )
     try:
-        response = await get_openai_vision_client().responses.create(**request_options)
-    except AuthenticationError as exc:
-        raise VisionLLMAuthenticationError("OpenAI rejected the backend credentials.") from exc
-    except (APITimeoutError, TimeoutError) as exc:
-        raise VisionLLMTimeoutError("OpenAI vision request timed out.") from exc
-    except BadRequestError as exc:
-        raise VisionLLMRequestError(
-            "OpenAI rejected the vision request.",
-            provider_status_code=exc.status_code,
-            provider_error_type=type(exc).__name__,
-        ) from exc
-    except (APIConnectionError, RateLimitError, APIStatusError) as exc:
+        response = await get_gemini_vision_client().aio.models.generate_content(
+            model=settings.gemini_vision_model,
+            contents=[
+                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                request_prompt,
+            ],
+            config=types.GenerateContentConfig(
+                system_instruction=VISION_ASSISTANT_INSTRUCTIONS,
+                max_output_tokens=110,
+                temperature=0.2,
+            ),
+        )
+    except Exception as exc:
+        status_code = getattr(exc, "status_code", None)
+        if status_code in (401, 403):
+            raise VisionLLMAuthenticationError("Gemini rejected the backend credentials.") from exc
+        if status_code in (408, 504) or isinstance(exc, TimeoutError):
+            raise VisionLLMTimeoutError("Gemini vision request timed out.") from exc
+        if status_code == 400:
+            raise VisionLLMRequestError(
+                "Gemini rejected the vision request.",
+                provider_status_code=status_code,
+                provider_error_type=type(exc).__name__,
+            ) from exc
         raise VisionLLMError(
-            "OpenAI vision is temporarily unavailable.",
-            provider_status_code=getattr(exc, "status_code", None),
+            "Gemini vision is temporarily unavailable.",
+            provider_status_code=status_code,
             provider_error_type=type(exc).__name__,
         ) from exc
 
-    content = clean_llm_response(response.output_text or "")
+    content = clean_llm_response(getattr(response, "text", None) or "")
     if not content:
-        raise VisionLLMError("OpenAI vision returned an empty response.")
+        raise VisionLLMError("Gemini vision returned an empty response.")
     return content
 
 
