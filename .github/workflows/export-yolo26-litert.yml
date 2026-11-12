@@ -13,6 +13,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: yolo26-litert-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   export:
     runs-on: ubuntu-latest
