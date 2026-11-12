@@ -8,3 +8,6 @@ tests/*
 !tests/test_vision_command.py
 !tests/test_face_enrollment.py
 data/frames
+# Exported mobile model artifacts are generated locally, not committed.
+models/*.tflite
+models/*_manifest.json
