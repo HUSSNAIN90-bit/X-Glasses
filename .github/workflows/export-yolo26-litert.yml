@@ -5,6 +5,7 @@ on:
     branches:
       - feature/offline-face-object-detection
     paths:
+      - .github/workflows/export-yolo26-litert.yml
       - scripts/export_yolo26_litert.py
       - models/yolo26n.pt
   workflow_dispatch:
