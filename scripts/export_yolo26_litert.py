@@ -39,7 +39,6 @@ def main() -> None:
         "format": "litert",
         "input_size": 640,
         "quantization": "w8a32",
-        "output_layout": "end2end_xyxy_score_class",
         "labels": labels,
         "sha256": digest,
         "bytes": OUTPUT.stat().st_size,
