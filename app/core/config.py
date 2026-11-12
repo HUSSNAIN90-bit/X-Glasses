@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     groq_chat_model: str = "llama-3.1-8b-instant"
 
     openai_api_key: str = ""
+    gemini_api_key: str = ""
+    gemini_live_model: str = "gemini-3.8-live"
     openai_vision_model: str = "gpt-6-astra"
     openai_timeout_seconds: float = 30.0
     openai_vision_service_tier: str = ""
