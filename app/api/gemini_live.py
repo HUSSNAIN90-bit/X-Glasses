@@ -25,7 +25,7 @@ async def create_live_token():
         "newSessionExpireTime": expires_at.isoformat().replace("+00:00", "Z"),
         "liveConnectConstraints": {
             "model": f"models/{settings.gemini_live_model}",
-            "config": {"responseModalities": ["AUDIO"], "sessionResumption": {}},
+            "config": {"responseModalities": ["AUDIO"], "outputAudioTranscription": {}, "sessionResumption": {}},
         },
     }
     try:
