@@ -8,6 +8,7 @@ from app.api.enrollment import router as enrollment_router
 from app.api.session import router as session_router
 from app.api.product_command import router as product_router
 from app.api.gemini_live import router as gemini_live_router
+from app.api.on_device_models import router as on_device_models_router
 
 from app.services.face_database import (
     initialize_database,
@@ -28,6 +29,7 @@ app.include_router(enrollment_router)
 app.include_router(session_router)
 app.include_router(product_router)
 app.include_router(gemini_live_router)
+app.include_router(on_device_models_router)
 
 @app.get("/")
 async def root():
