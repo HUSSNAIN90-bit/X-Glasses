@@ -2,11 +2,23 @@
   "model": "yolo26n",
   "format": "litert",
   "input_size": 640,
-  "input_layout": "NHWC",
+  "input_shape": [
+    1,
+    3,
+    640,
+    640
+  ],
+  "input_layout": "NCHW",
   "input_color": "RGB",
   "input_type": "float32",
+  "output_shape": [
+    1,
+    84,
+    8400
+  ],
+  "output_layout": "raw_channels_first_xywh_class_scores",
+  "output_type": "float32",
   "quantization": "w8a32",
-  "output_layout": "end2end_xyxy_score_class",
   "labels": [
     "person",
     "bicycle",
@@ -89,6 +101,6 @@
     "hair drier",
     "toothbrush"
   ],
-  "sha256": "76257425853e0b6f74a4c480cf63fd723a6319f96bb88382ccdd20ed19493db0",
-  "bytes": 2875562
+  "sha256": "349f725b8857aab6402eee7bbf86a3ad2cd4b2fc4868f33b2e60ace9bb04def7",
+  "bytes": 2875560
 }
